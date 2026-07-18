@@ -38,11 +38,10 @@ enum RuleSet {
     Aamva,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> {
     match Args::parse().action {
         Action::GetNamespaces { mdl } => print_namespaces(mdl.to_string()),
-        Action::ValidateCerts { rules, ds, root } => validate_certs(rules, ds, root).await,
+        Action::ValidateCerts { rules, ds, root } => validate_certs(rules, ds, root),
     }
 }
 
@@ -58,12 +57,12 @@ fn print_namespaces(mdl: String) -> Result<(), Error> {
     Ok(())
 }
 
-async fn validate_certs(rules: RuleSet, ds: PathBuf, root: PathBuf) -> Result<(), Error> {
+fn validate_certs(rules: RuleSet, ds: PathBuf, root: PathBuf) -> Result<(), Error> {
     let mut ds_bytes = vec![];
     File::open(ds)?.read_to_end(&mut ds_bytes)?;
     let mut root_bytes = vec![];
     File::open(root)?.read_to_end(&mut root_bytes)?;
-    let validation_errors = x509::validate(rules, &ds_bytes, &root_bytes).await?;
+    let validation_errors = x509::validate(rules, &ds_bytes, &root_bytes)?;
     if validation_errors.is_empty() {
         println!("Validated!");
     } else {

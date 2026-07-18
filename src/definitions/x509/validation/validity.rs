@@ -1,20 +1,19 @@
 use time::OffsetDateTime;
 use x509_cert::Certificate;
 
-/// Check certificate validity period against a specific time.
-pub fn check_validity_period_at(certificate: &Certificate, at: OffsetDateTime) -> Vec<Error> {
+pub fn check_validity_period(certificate: &Certificate) -> Vec<Error> {
     let validity = certificate.tbs_certificate.validity;
     let mut errors: Vec<Error> = vec![];
-
-    let not_after = OffsetDateTime::from(validity.not_after.to_system_time());
-    let not_before = OffsetDateTime::from(validity.not_before.to_system_time());
-
-    if not_after < at {
+    if validity.not_after.to_unix_duration().as_secs()
+        < OffsetDateTime::now_utc().unix_timestamp() as u64
+    {
         errors.push(Error::Expired);
-    }
-    if not_before > at {
+    };
+    if validity.not_before.to_unix_duration().as_secs()
+        > OffsetDateTime::now_utc().unix_timestamp() as u64
+    {
         errors.push(Error::NotYetValid);
-    }
+    };
 
     errors
 }

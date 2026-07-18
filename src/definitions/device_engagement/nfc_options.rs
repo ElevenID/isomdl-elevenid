@@ -289,26 +289,29 @@ mod test {
     fn command_data_try_from_i32_test() {
         let u16v: u16 = 2345;
         let i32v: i32 = u16v.into();
-        let val = CommandDataLength::try_from(i32v).expect("failed to parse command data length");
-        assert_eq!(CommandDataLength(u16v), val);
+        assert_eq!(
+            Ok(CommandDataLength(u16v)),
+            CommandDataLength::try_from(i32v)
+        );
     }
 
     #[test]
     fn command_data_try_from_u64_test() {
         let u16v: u16 = 2345;
         let u64v: u64 = u16v.into();
-        let val = CommandDataLength::try_from(u64v).expect("failed to parse command data length");
-        assert_eq!(CommandDataLength(u16v), val);
+        assert_eq!(
+            Ok(CommandDataLength(u16v)),
+            CommandDataLength::try_from(u64v)
+        );
     }
 
     #[test]
     fn command_data_try_from_u64_fails_test() {
         let u64v: u64 = u64::MAX;
-        if let Err(err) = CommandDataLength::try_from(u64v) {
-            assert_eq!(Error::InvalidNfcCommandDataLengthError as u8, err as u8);
-        } else {
-            panic!("expected error parsing command data length")
-        }
+        assert_eq!(
+            Err(Error::InvalidNfcCommandDataLengthError),
+            CommandDataLength::try_from(u64v)
+        );
     }
 
     #[test]
@@ -354,26 +357,29 @@ mod test {
     fn response_data_try_from_i64_test() {
         let u32v: u32 = 2345;
         let i64v: i64 = u32v.into();
-        let val = ResponseDataLength::try_from(i64v).expect("failed to parse response data length");
-        assert_eq!(ResponseDataLength(u32v), val);
+        assert_eq!(
+            Ok(ResponseDataLength(u32v)),
+            ResponseDataLength::try_from(i64v)
+        );
     }
 
     #[test]
     fn response_data_try_from_u64_test() {
         let u32v: u32 = 2345;
         let u64v: u64 = u32v.into();
-        let val = ResponseDataLength::try_from(u64v).expect("failed to parse response data length");
-        assert_eq!(ResponseDataLength(u32v), val);
+        assert_eq!(
+            Ok(ResponseDataLength(u32v)),
+            ResponseDataLength::try_from(u64v)
+        );
     }
 
     #[test]
     fn response_data_try_from_u64_fails_test() {
         let u64v: u64 = u64::MAX;
-        if let Err(err) = ResponseDataLength::try_from(u64v) {
-            assert_eq!(Error::InvalidNfcResponseDataLengthError as u8, err as u8);
-        } else {
-            panic!("expected error parsing response data length")
-        }
+        assert_eq!(
+            Err(Error::InvalidNfcResponseDataLengthError),
+            ResponseDataLength::try_from(u64v)
+        );
     }
 
     #[test]
@@ -418,12 +424,9 @@ mod test {
         };
 
         let bytes: Vec<u8> = cbor::to_vec(&nfc_options).unwrap();
-
-        if let Err(err) = cbor::from_slice::<NfcOptions>(&bytes).map_err(Error::from) {
-            assert_eq!(Error::CborError as u8, err as u8);
-        } else {
-            panic!("Expected round trip cbor command data serialization to fail");
-        }
+        let deserialized_result: Result<NfcOptions, Error> =
+            cbor::from_slice(&bytes).map_err(Error::from);
+        assert_eq!(Err(Error::CborError), deserialized_result);
     }
 
     #[test]
@@ -434,11 +437,8 @@ mod test {
         };
 
         let bytes: Vec<u8> = cbor::to_vec(&nfc_options).unwrap();
-
-        if let Err(err) = cbor::from_slice::<NfcOptions>(&bytes).map_err(Error::from) {
-            assert_eq!(Error::CborError as u8, err as u8);
-        } else {
-            panic!("Expected round trip cbor response data serialization to fail");
-        }
+        let deserialized_result: Result<NfcOptions, Error> =
+            cbor::from_slice(&bytes).map_err(Error::from);
+        assert_eq!(Err(Error::CborError), deserialized_result);
     }
 }

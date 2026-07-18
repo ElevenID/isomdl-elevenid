@@ -17,13 +17,10 @@
 //! You can view examples in `tests` directory in `simulated_device_and_reader.rs`, for a basic example and
 //! `simulated_device_and_reader_state.rs` which uses `State` pattern, `Arc` and `Mutex`.
 use crate::{
-    cbor::{self, CborError},
+    cbor,
     cose::{mac0::PreparedCoseMac0, sign1::PreparedCoseSign1, MaybeTagged},
     definitions::{
-        device_engagement::{
-            nfc::{NegotiatedBleInfo, NegotiatedCarrierInfo},
-            DeviceRetrievalMethod, Security, ServerRetrievalMethods,
-        },
+        device_engagement::{DeviceRetrievalMethod, Security, ServerRetrievalMethods},
         device_request::{DeviceRequest, DocRequest, ItemsRequest},
         device_response::{
             Document as DeviceResponseDoc, DocumentError, DocumentErrorCode, DocumentErrors,
@@ -35,12 +32,10 @@ use crate::{
         helpers::{tag24, NonEmptyMap, NonEmptyVec, Tag24},
         issuer_signed::{IssuerSigned, IssuerSignedItemBytes},
         session::{
-            self, derive_e_mac_key, derive_session_key, get_shared_secret, Handover, SessionData,
-            SessionTranscript,
+            self, derive_session_key, get_shared_secret, Handover, SessionData, SessionTranscript,
         },
         x509::{
-            self, revocation::RevocationFetcher, trust_anchor::TrustAnchorRegistry,
-            x5chain::X5CHAIN_COSE_HEADER_LABEL, X5Chain,
+            self, trust_anchor::TrustAnchorRegistry, x5chain::X5CHAIN_COSE_HEADER_LABEL, X5Chain,
         },
         CoseKey, DeviceEngagement, DeviceResponse, IssuerSignedItem, Mso, SessionEstablishment,
     },
@@ -48,8 +43,8 @@ use crate::{
 };
 use coset::Label;
 use coset::{CoseMac0Builder, CoseSign1, CoseSign1Builder};
+use ecdsa::VerifyingKey;
 use p256::{FieldBytes, NistP256};
-use p384::NistP384;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use session::SessionTranscript180135;
@@ -83,24 +78,14 @@ pub struct SessionManagerInit {
 
 /// Engaged state.
 ///
-/// Transition to this state is made with [SessionManagerInit::engage].
+/// Transition to this state is made with [SessionManagerInit::qr_engagement].
 /// That creates the `QR code` that the reader will use to establish the session.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionManagerEngaged {
-    pub documents: Documents,
-    pub e_device_key: Vec<u8>,
-    pub device_engagement: Tag24<DeviceEngagement>,
-    pub handover: Handover,
-}
-
-impl SessionManagerEngaged {
-    /// Return the QR code URI for the engaged session.
-    ///
-    /// This URI can be used to establish a session with the reader,
-    /// regardless of the inner `Handover` type of the engaged session.
-    pub fn qr_handover(&self) -> Result<String, CborError> {
-        self.device_engagement.to_qr_code_uri()
-    }
+    documents: Documents,
+    e_device_key: Vec<u8>,
+    device_engagement: Tag24<DeviceEngagement>,
+    handover: Handover,
 }
 
 /// The initial state of the Session Manager.
@@ -224,9 +209,6 @@ pub struct PreparedDocument {
 pub struct ReaderAuthOutcome {
     pub common_name: Option<String>,
     pub errors: Vec<String>,
-    /// Errors encountered while checking CRL revocation status (e.g., fetch failures).
-    /// Actual certificate revocation is reported in `errors`, not here.
-    pub revocation_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,18 +236,6 @@ pub type RequestedItems = Vec<ItemsRequest>;
 /// The lis of items that are permitted to be shared grouped by document type and namespace.
 pub type PermittedItems = BTreeMap<DocType, BTreeMap<Namespace, Vec<ElementIdentifier>>>;
 
-/// Generate an ephemeral key for device engagement.
-/// Returns: (private_key, public_key)
-pub(crate) fn ephemeral_key() -> Result<(Vec<u8>, Security), Error> {
-    let (e_device_key, e_device_key_pub) =
-        session::create_p256_ephemeral_keys().map_err(Error::EKeyGeneration)?;
-    let e_device_key_bytes =
-        Tag24::<CoseKey>::new(e_device_key_pub).map_err(Error::Tag24CborEncoding)?;
-    let security = Security(1, e_device_key_bytes);
-
-    Ok((e_device_key.to_bytes().to_vec(), security))
-}
-
 impl SessionManagerInit {
     /// Initialise the SessionManager.
     ///
@@ -278,7 +248,11 @@ impl SessionManagerInit {
         device_retrieval_methods: Option<NonEmptyVec<DeviceRetrievalMethod>>,
         server_retrieval_methods: Option<ServerRetrievalMethods>,
     ) -> Result<Self, Error> {
-        let (e_device_key, security) = ephemeral_key()?;
+        let (e_device_key, e_device_key_pub) =
+            session::create_p256_ephemeral_keys().map_err(Error::EKeyGeneration)?;
+        let e_device_key_bytes =
+            Tag24::<CoseKey>::new(e_device_key_pub).map_err(Error::Tag24CborEncoding)?;
+        let security = Security(1, e_device_key_bytes);
 
         let device_engagement = DeviceEngagement {
             version: "1.0".to_string(),
@@ -292,31 +266,8 @@ impl SessionManagerInit {
             Tag24::<DeviceEngagement>::new(device_engagement).map_err(Error::Tag24CborEncoding)?;
 
         Ok(Self {
-            // device_engagement_type,
             documents,
-            e_device_key,
-            device_engagement,
-        })
-    }
-
-    /// Initialise the SessionManager with a prenegotiated connection.
-    pub fn initialise_with_prenegotiated_carrier(
-        documents: Documents,
-        negotiated_carrier: &NegotiatedCarrierInfo,
-    ) -> Result<Self, Error> {
-        let (e_device_key, device_engagement) = match &negotiated_carrier.ble {
-            NegotiatedBleInfo::StaticHandover {
-                private_key,
-                device_engagement,
-            } => (private_key.clone(), *device_engagement.clone()),
-        };
-
-        let device_engagement =
-            Tag24::<DeviceEngagement>::new(device_engagement).map_err(Error::Tag24CborEncoding)?;
-
-        Ok(Self {
-            documents,
-            e_device_key,
+            e_device_key: e_device_key.to_bytes().to_vec(),
             device_engagement,
         })
     }
@@ -328,8 +279,6 @@ impl SessionManagerInit {
     /// Begins the device engagement using **QR code**.
     ///
     /// The response contains the device's public key and engagement data.
-    #[allow(deprecated)]
-    #[deprecated(note = "use the `engage()` method instead to engage the session.")]
     pub fn qr_engagement(self) -> anyhow::Result<(SessionManagerEngaged, String)> {
         let qr_code_uri = self.device_engagement.to_qr_code_uri()?;
         let sm = SessionManagerEngaged {
@@ -339,30 +288,6 @@ impl SessionManagerInit {
             handover: Handover::QR,
         };
         Ok((sm, qr_code_uri))
-    }
-
-    /// Returns the session manager engaged
-    ///
-    /// Consumes the initialized session and returns the device engagement.
-    ///
-    /// NOTE: unlike `qr_engagement()` method, if the handover method is QR, it will return the QR code URI within the
-    /// `SessionManagerEngaged`, returning a single value rather than a tuple with a qr code uri as the second item.
-    ///
-    /// ```ignore
-    /// use isomdl::definitions::session::Handover
-    ///
-    /// let engaged_session = session.engage(Handover::QR)?;
-    ///
-    /// let qr_code_uri = engaged_session.qr_handover()?;
-    ///
-    /// ```
-    pub fn engage(self, handover: Handover) -> anyhow::Result<SessionManagerEngaged> {
-        Ok(SessionManagerEngaged {
-            documents: self.documents,
-            device_engagement: self.device_engagement,
-            e_device_key: self.e_device_key,
-            handover,
-        })
     }
 }
 
@@ -375,16 +300,10 @@ impl SessionManagerEngaged {
     ///
     /// Along with transitioning to [SessionManagerEngaged] state,
     /// it returns the requested items by the reader.
-    ///
-    /// # Arguments
-    /// * `session_establishment` - The session establishment data from the reader
-    /// * `trusted_verifiers` - Registry of trusted reader CA certificates
-    /// * `revocation_fetcher` - HTTP client for CRL verification. Use `&()` to skip CRL checks.
-    pub async fn process_session_establishment<R: RevocationFetcher>(
+    pub fn process_session_establishment(
         self,
         session_establishment: SessionEstablishment,
         trusted_verifiers: TrustAnchorRegistry,
-        revocation_fetcher: &R,
     ) -> anyhow::Result<(SessionManager, RequestAuthenticationOutcome)> {
         let e_reader_key = session_establishment.e_reader_key;
         let session_transcript =
@@ -413,42 +332,16 @@ impl SessionManagerEngaged {
             device_auth_type: DeviceAuthType::Sign1,
         };
 
-        let validated_request = sm
-            .handle_decoded_request(
-                SessionData {
-                    data: Some(session_establishment.data),
-                    status: None,
-                },
-                revocation_fetcher,
-            )
-            .await;
+        let validated_request = sm.handle_decoded_request(SessionData {
+            data: Some(session_establishment.data),
+            status: None,
+        });
 
         Ok((sm, validated_request))
     }
 }
 
 impl SessionManager {
-    /// Set the device authentication type used when building the next response.
-    pub fn set_device_auth_type(&mut self, device_auth_type: DeviceAuthType) {
-        self.device_auth_type = device_auth_type;
-    }
-
-    /// Derive EMacKey for MAC0 device authentication (ISO 18013-5 §9.1.3.5).
-    ///
-    /// Computes `ECDH(static_key, EReaderKey)` followed by HKDF to produce the 32-byte key
-    /// used to compute HMAC-SHA256 tags in the signing loop.
-    pub fn e_mac_key_from_static_key(
-        &self,
-        static_key: &p256::NonZeroScalar,
-    ) -> anyhow::Result<[u8; 32]> {
-        let e_reader_key = self.session_transcript.1.clone().into_inner();
-        let shared_secret = get_shared_secret(e_reader_key, static_key)?;
-        let session_transcript_bytes = Tag24::new(self.session_transcript.clone())
-            .map_err(|e| anyhow::anyhow!("failed to encode session transcript: {e}"))?;
-        let key = derive_e_mac_key(&shared_secret, &session_transcript_bytes)?;
-        Ok(key.into())
-    }
-
     fn parse_request(&self, request: &[u8]) -> Result<DeviceRequest, PreparedDeviceResponse> {
         let request: ciborium::Value = cbor::from_slice(request).map_err(|error| {
             tracing::error!("unable to decode DeviceRequest bytes as cbor: {}", error);
@@ -461,11 +354,7 @@ impl SessionManager {
         })
     }
 
-    async fn validate_request<R: RevocationFetcher>(
-        &self,
-        request: DeviceRequest,
-        revocation_fetcher: &R,
-    ) -> RequestAuthenticationOutcome {
+    fn validate_request(&self, request: DeviceRequest) -> RequestAuthenticationOutcome {
         let items_request: Vec<ItemsRequest> = request
             .doc_requests
             .clone()
@@ -479,7 +368,6 @@ impl SessionManager {
             common_name: None,
             reader_authentication: AuthenticationStatus::Unchecked,
             errors: BTreeMap::new(),
-            warnings: BTreeMap::new(),
         };
 
         if request.version != DeviceRequest::VERSION {
@@ -494,22 +382,12 @@ impl SessionManager {
             );
         }
         if let Some(doc_request) = request.doc_requests.first() {
-            let outcome = self
-                .reader_authentication(doc_request.clone(), revocation_fetcher)
-                .await;
+            let outcome = self.reader_authentication(doc_request.clone());
             if outcome.errors.is_empty() {
                 validated_request.reader_authentication = AuthenticationStatus::Valid;
             } else {
                 validated_request.reader_authentication = AuthenticationStatus::Invalid;
                 tracing::error!("Reader authentication errors: {:#?}", outcome.errors);
-            }
-
-            // Add revocation errors as warnings (non-fatal)
-            if !outcome.revocation_errors.is_empty() {
-                validated_request.warnings.insert(
-                    "revocation_errors".to_string(),
-                    json!(outcome.revocation_errors),
-                );
             }
 
             validated_request.common_name = outcome.common_name;
@@ -538,11 +416,7 @@ impl SessionManager {
         self.state = State::Signing(prepared_response);
     }
 
-    async fn handle_decoded_request<R: RevocationFetcher>(
-        &mut self,
-        request: SessionData,
-        revocation_fetcher: &R,
-    ) -> RequestAuthenticationOutcome {
+    fn handle_decoded_request(&mut self, request: SessionData) -> RequestAuthenticationOutcome {
         let mut validated_request = RequestAuthenticationOutcome::default();
         let data = match request.data {
             Some(d) => d,
@@ -580,7 +454,7 @@ impl SessionManager {
             }
         };
 
-        self.validate_request(request, revocation_fetcher).await
+        self.validate_request(request)
     }
 
     /// Handle a request from the reader.
@@ -590,15 +464,7 @@ impl SessionManager {
     ///
     /// This method will return the [RequestAuthenticationOutcome] struct, which will
     /// include the items requested by the reader/verifier.
-    ///
-    /// # Arguments
-    /// * `request` - The raw CBOR-encoded request bytes
-    /// * `revocation_fetcher` - HTTP client for CRL verification. Use `&()` to skip CRL checks.
-    pub async fn handle_request<R: RevocationFetcher>(
-        &mut self,
-        request: &[u8],
-        revocation_fetcher: &R,
-    ) -> RequestAuthenticationOutcome {
+    pub fn handle_request(&mut self, request: &[u8]) -> RequestAuthenticationOutcome {
         let mut validated_request = RequestAuthenticationOutcome::default();
         let session_data: SessionData = match cbor::from_slice(request) {
             Ok(sd) => sd,
@@ -609,8 +475,7 @@ impl SessionManager {
                 return validated_request;
             }
         };
-        self.handle_decoded_request(session_data, revocation_fetcher)
-            .await
+        self.handle_decoded_request(session_data)
     }
 
     /// When there are documents to be signed, it will return then next one for signing.
@@ -714,19 +579,7 @@ impl SessionManager {
         }
     }
 
-    /// Authenticate a reader's request using the reader certificate chain.
-    ///
-    /// This validates the reader's certificate chain and checks for revocation
-    /// if a CRL fetcher is configured.
-    ///
-    /// # Arguments
-    /// * `doc_request` - The document request containing reader authentication
-    /// * `revocation_fetcher` - Revocation fetcher for CRL checking. Use `&()` to skip CRL checks.
-    pub async fn reader_authentication<R: RevocationFetcher>(
-        &self,
-        doc_request: DocRequest,
-        revocation_fetcher: &R,
-    ) -> ReaderAuthOutcome {
+    pub fn reader_authentication(&self, doc_request: DocRequest) -> ReaderAuthOutcome {
         let mut outcome = ReaderAuthOutcome::default();
 
         let Some(reader_auth) = doc_request.reader_auth else {
@@ -762,11 +615,20 @@ impl SessionManager {
         outcome.common_name = Some(x5chain.end_entity_common_name().to_string());
 
         let x5chain_validation_outcome = x509::validation::ValidationRuleset::MdlReaderOneStep
-            .validate(&x5chain, &self.trusted_verifiers, revocation_fetcher)
-            .await;
+            .validate(&x5chain, &self.trusted_verifiers);
 
         outcome.errors.extend(x5chain_validation_outcome.errors);
-        outcome.revocation_errors = x5chain_validation_outcome.revocation_errors;
+
+        // TODO: Support more than P-256.
+        let verifier: VerifyingKey<NistP256> = match x5chain.end_entity_public_key() {
+            Ok(verifier) => verifier,
+            Err(e) => {
+                outcome.errors.push(format!(
+                    "Processing: reader public key cannot be decoded: {e}"
+                ));
+                return outcome;
+            }
+        };
 
         let detached_payload = match Tag24::new(ReaderAuthentication(
             "ReaderAuthentication".into(),
@@ -792,53 +654,14 @@ impl SessionManager {
             }
         };
 
-        // Verify signature using the appropriate curve based on the certificate's key type
-        let Some(curve) = x509::SupportedCurve::from_certificate(x5chain.end_entity_certificate())
-        else {
-            outcome.errors.push(
-                "Processing: unsupported or missing curve OID in reader certificate".to_string(),
+        let verification_outcome = reader_auth
+            .verify::<VerifyingKey<NistP256>, p256::ecdsa::Signature>(
+                &verifier,
+                Some(&detached_payload),
+                None,
             );
-            return outcome;
-        };
 
-        let verification_result = match curve {
-            x509::SupportedCurve::P256 => {
-                let verifier: ecdsa::VerifyingKey<NistP256> = match x5chain.end_entity_public_key()
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        outcome.errors.push(format!(
-                            "Processing: reader public key cannot be decoded: {e}"
-                        ));
-                        return outcome;
-                    }
-                };
-                reader_auth.verify::<ecdsa::VerifyingKey<NistP256>, p256::ecdsa::Signature>(
-                    &verifier,
-                    Some(&detached_payload),
-                    None,
-                )
-            }
-            x509::SupportedCurve::P384 => {
-                let verifier: ecdsa::VerifyingKey<NistP384> = match x5chain.end_entity_public_key()
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        outcome.errors.push(format!(
-                            "Processing: reader public key cannot be decoded: {e}"
-                        ));
-                        return outcome;
-                    }
-                };
-                reader_auth.verify::<ecdsa::VerifyingKey<NistP384>, p384::ecdsa::Signature>(
-                    &verifier,
-                    Some(&detached_payload),
-                    None,
-                )
-            }
-        };
-
-        if let Err(e) = verification_result.into_result() {
+        if let Err(e) = verification_outcome.into_result() {
             outcome.errors.push(format!(
                 "Verification: failed to verify reader auth signature: {e}"
             ))
@@ -1062,11 +885,12 @@ pub trait DeviceSession {
                     continue;
                 }
             };
+            let header = coset::HeaderBuilder::new()
+                .algorithm(signature_algorithm)
+                .build();
+
             let prepared_cose = match self.device_auth_type() {
                 DeviceAuthType::Sign1 => {
-                    let header = coset::HeaderBuilder::new()
-                        .algorithm(signature_algorithm)
-                        .build();
                     let cose_sign1_builder = CoseSign1Builder::new().protected(header);
                     let prepared_cose_sign1 = match PreparedCoseSign1::new(
                         cose_sign1_builder,
@@ -1087,12 +911,6 @@ pub trait DeviceSession {
                     PreparedCose::Sign1(prepared_cose_sign1)
                 }
                 DeviceAuthType::Mac0 => {
-                    // MAC0 device authentication requires p256: EMacKey is derived via
-                    // ECDH(SDeviceKey, EReaderKey) + HKDF (ISO 18013-5 §9.1.3.5), which is
-                    // only defined for NistP256.
-                    let header = coset::HeaderBuilder::new()
-                        .algorithm(coset::iana::Algorithm::HMAC_256_256)
-                        .build();
                     let cose_mac0_builder = CoseMac0Builder::new().protected(header);
                     let prepared_cose_mac0 = match PreparedCoseMac0::new(
                         cose_mac0_builder,

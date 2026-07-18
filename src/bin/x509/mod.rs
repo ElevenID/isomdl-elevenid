@@ -8,11 +8,7 @@ use x509_cert::Certificate;
 
 use crate::RuleSet;
 
-pub async fn validate(
-    rules: RuleSet,
-    signer: &[u8],
-    root: &[u8],
-) -> Result<Vec<String>, anyhow::Error> {
+pub fn validate(rules: RuleSet, signer: &[u8], root: &[u8]) -> Result<Vec<String>, anyhow::Error> {
     let root = Certificate::from_pem(root)?;
 
     let trust_anchor = TrustAnchor {
@@ -26,13 +22,11 @@ pub async fn validate(
 
     let x5chain = X5Chain::builder().with_pem_certificate(signer)?.build()?;
 
-    // Use () to skip CRL checks in CLI tool for now
     let outcome = match rules {
         RuleSet::Iaca => ValidationRuleset::Mdl,
         RuleSet::Aamva => ValidationRuleset::AamvaMdl,
     }
-    .validate(&x5chain, &trust_anchor_registry, &())
-    .await;
+    .validate(&x5chain, &trust_anchor_registry);
 
     Ok(outcome.errors)
 }
