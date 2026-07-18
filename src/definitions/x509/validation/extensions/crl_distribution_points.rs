@@ -10,9 +10,7 @@ use x509_cert::ext::{
 
 use super::{Error, ExtensionValidator};
 
-/// CRLDistributionPoints validation for all certificate profiles (strict mode).
-///
-/// This validator requires distribution points to be URIs only, as per 18013-5.
+/// CRLDistributionPoints validation for all certificate profiles.
 pub struct CrlDistributionPointsValidator;
 
 impl CrlDistributionPointsValidator {
@@ -46,60 +44,6 @@ impl CrlDistributionPointsValidator {
             }
         }
         errors
-    }
-}
-
-/// CRLDistributionPoints validation that allows DirectoryName entries.
-///
-/// This is a more permissive validator that accepts DirectoryName in addition to URIs,
-/// suitable for VICAL signer certificates.
-pub struct RelaxedCrlDistributionPointsValidator;
-
-impl RelaxedCrlDistributionPointsValidator {
-    fn check(crl_distribution_points: CrlDistributionPoints) -> Vec<Error> {
-        if crl_distribution_points.0.is_empty() {
-            return vec!["expected one or more distribution points".into()];
-        }
-        let mut errors = vec![];
-        for point in crl_distribution_points.0.into_iter() {
-            // At least one distribution point must have a valid name.
-            if !point
-                .distribution_point
-                .as_ref()
-                .is_some_and(|dpn| match dpn {
-                    DistributionPointName::FullName(names) => names.iter().any(|gn| {
-                        matches!(
-                            gn,
-                            GeneralName::UniformResourceIdentifier(_)
-                                | GeneralName::DirectoryName(_)
-                        )
-                    }),
-                    DistributionPointName::NameRelativeToCRLIssuer(_) => true,
-                })
-            {
-                errors.push(format!("point is invalid: {point:?}",))
-            }
-        }
-        errors
-    }
-}
-
-impl ExtensionValidator for RelaxedCrlDistributionPointsValidator {
-    fn oid(&self) -> const_oid::ObjectIdentifier {
-        CrlDistributionPoints::OID
-    }
-
-    fn ext_name(&self) -> &'static str {
-        "CrlDistributionPoints"
-    }
-
-    fn validate(&self, extension: &Extension) -> Vec<Error> {
-        let bytes = extension.extn_value.as_bytes();
-        let crl_distribution_points = CrlDistributionPoints::from_der(bytes);
-        match crl_distribution_points {
-            Ok(crl_dps) => Self::check(crl_dps),
-            Err(e) => vec![format!("failed to decode: {e}")],
-        }
     }
 }
 

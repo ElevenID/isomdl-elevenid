@@ -4,8 +4,6 @@
 //! based on a message count and a flag indicating whether the vector is for the reader or the device.
 use super::helpers::Tag24;
 use super::DeviceEngagement;
-use crate::cbor::CborError;
-
 use crate::definitions::device_engagement::EReaderKeyBytes;
 use crate::definitions::device_key::cose_key::EC2Y;
 use crate::definitions::device_key::CoseKey;
@@ -26,7 +24,6 @@ use elliptic_curve::{
     sec1::FromEncodedPoint,
 };
 use hkdf::Hkdf;
-use ndef_rs::error::NdefError;
 use p256::NistP256;
 use p384::NistP384;
 use rand::rngs::OsRng;
@@ -37,6 +34,7 @@ pub type EReaderKey = CoseKey;
 pub type EDeviceKey = CoseKey;
 pub type DeviceEngagementBytes = Tag24<DeviceEngagement>;
 pub type SessionTranscriptBytes = Tag24<SessionTranscript180135>;
+pub type NfcHandover = (ByteStr, Option<ByteStr>);
 
 /// Represents the establishment of a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +104,7 @@ pub struct SessionTranscript180135(
 
 impl SessionTranscript for SessionTranscript180135 {}
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
     #[error("Curve not supported for DH exchange")]
     UnsupportedCurve,
@@ -116,13 +114,6 @@ pub enum Error {
     SessionKeyError,
     #[error("Something went wrong generating ephemeral keys")]
     EphemeralKeyError,
-    #[error("Serialization error")]
-    Cbor(#[from] CborError),
-    #[error("NFC negotiation error")]
-    Ndef(#[from] NdefError),
-    // I don't like using anyhow in an API, but ndef_rs itself returns anyhow errors.
-    #[error("Failed serializing NFC NDEF message")]
-    NdefSerialization(anyhow::Error),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,28 +215,6 @@ pub fn derive_session_key(
         Hkdf::expand(&hkdf, sk_device, &mut okm).unwrap();
     }
 
-    Ok(okm.into())
-}
-
-/// Derive the EMacKey from the shared secret per ISO 18013-5 section 9.1.3.5.
-///
-/// The EMacKey is used for HMAC-based device authentication (COSE_Mac0) as an
-/// alternative to ECDSA-based device authentication (COSE_Sign1).
-///
-/// The shared secret must be derived using ECDH with the mdoc authentication key (SDeviceKey)
-/// and the reader's ephemeral key (EReaderKey), not the ephemeral device session key.
-pub fn derive_e_mac_key<T: serde::Serialize>(
-    shared_secret: &SharedSecret<NistP256>,
-    session_transcript: &Tag24<T>,
-) -> Result<GenericArray<u8, U32>> {
-    let salt = Sha256::digest(
-        crate::cbor::to_vec(session_transcript)
-            .map_err(|e| anyhow::anyhow!("failed to serialize session transcript: {e}"))?,
-    );
-    let hkdf = shared_secret.extract::<Sha256>(Some(salt.as_ref()));
-    let mut okm = [0u8; 32];
-    Hkdf::expand(&hkdf, b"EMacKey", &mut okm)
-        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
     Ok(okm.into())
 }
 
@@ -368,6 +337,42 @@ mod test {
             cbor::from_slice(&cbor).expect("failed to deserialize as handover");
         if !matches!(handover, Handover::QR) {
             panic!("expected 'Handover::QR', received {handover:?}")
+        } else {
+            let roundtripped =
+                cbor::to_vec(&handover).expect("failed to serialize handover as cbor");
+            assert_eq!(
+                cbor, roundtripped,
+                "re-serialized handover did not match initial bytes"
+            )
+        }
+    }
+
+    #[test]
+    fn nfc_static_handover() {
+        // ['hello', null]
+        let cbor = hex::decode("824568656C6C6FF6").expect("failed to decode hex");
+        let handover: Handover =
+            cbor::from_slice(&cbor).expect("failed to deserialize as handover");
+        if !matches!(handover, Handover::NFC(..)) {
+            panic!("expected 'Handover::NFC(..)', received {handover:?}")
+        } else {
+            let roundtripped =
+                cbor::to_vec(&handover).expect("failed to serialize handover as cbor");
+            assert_eq!(
+                cbor, roundtripped,
+                "re-serialized handover did not match initial bytes"
+            )
+        }
+    }
+
+    #[test]
+    fn nfc_negotiated_handover() {
+        // ['hello', 'world']
+        let cbor = hex::decode("824568656C6C6F45776F726C64").expect("failed to decode hex");
+        let handover: Handover =
+            cbor::from_slice(&cbor).expect("failed to deserialize as handover");
+        if !matches!(handover, Handover::NFC(..)) {
+            panic!("expected 'Handover::NFC(..)', received {handover:?}")
         } else {
             let roundtripped =
                 cbor::to_vec(&handover).expect("failed to serialize handover as cbor");

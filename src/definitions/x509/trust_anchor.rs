@@ -24,8 +24,6 @@ pub enum TrustPurpose {
     Iaca,
     /// Reader Certificate Authority as defined in 18013-5.
     ReaderCa,
-    /// VICAL Authority - the CA that issues VICAL signer certificates.
-    VicalAuthority,
 }
 
 /// PEM representation of a TrustAnchor, used for serialization and deserialization only.

@@ -6,6 +6,7 @@ use coset::iana::Algorithm;
 use coset::{CoseSign1, Label};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use signature::{SignatureEncoding, Signer};
 
 use crate::cose::sign1::PreparedCoseSign1;
@@ -432,7 +433,11 @@ fn digest_namespace(
         .chain(random_digests)
         .map(|result| {
             let (digest_id, bytes) = result?;
-            let digest = digest_algorithm.digest(&bytes);
+            let digest = match digest_algorithm {
+                DigestAlgorithm::SHA256 => Sha256::digest(bytes).to_vec(),
+                DigestAlgorithm::SHA384 => Sha384::digest(bytes).to_vec(),
+                DigestAlgorithm::SHA512 => Sha512::digest(bytes).to_vec(),
+            };
             Ok((digest_id, digest.into()))
         })
         .collect()
