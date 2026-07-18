@@ -1,0 +1,15 @@
+name: Organization quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    uses: ElevenID/.github/.github/workflows/quality-workflows.yml@9b6141e294da5c0f9254cfaa60c8934df95ec68b
+    with:
+      policy-ref: 9b6141e294da5c0f9254cfaa60c8934df95ec68b
