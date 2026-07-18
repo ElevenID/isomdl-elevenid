@@ -1,0 +1,74 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "43 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+      - name: Merge upstream into synchronization branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "elevenid-upstream-sync[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/spruceid/isomdl.git
+          git fetch --prune --tags upstream main
+          git switch -C automation/sync-upstream origin/main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git push --force-with-lease origin automation/sync-upstream
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Report synchronization conflict
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create upstream-sync --color 1d76db --description "Automated upstream synchronization" --force
+          issue="$(gh issue list --state open --search 'Upstream synchronization conflict in:title' --json url --jq '.[0].url')"
+          if [ -z "$issue" ]; then
+            gh issue create --title "Upstream synchronization conflict" --label upstream-sync --body "The scheduled merge of spruceid/isomdl main conflicted with the ElevenID security patch. Review the failed workflow and resolve the delta manually."
+          else
+            gh issue comment "$issue" --body "The latest scheduled synchronization still conflicts; see this workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+          exit 1
+      - name: Create or refresh synchronization pull request
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create upstream-sync --color 1d76db --description "Automated upstream synchronization" --force
+          gh pr create --base main --head automation/sync-upstream --title "chore: synchronize upstream isomdl" --label upstream-sync --body "Reviewed merge of the current spruceid/isomdl main branch. This pull request never merges automatically and must pass the complete fork test suite." || gh pr edit automation/sync-upstream --title "chore: synchronize upstream isomdl" --body "Reviewed merge of the current spruceid/isomdl main branch. This pull request never merges automatically and must pass the complete fork test suite."
+      - name: Close obsolete synchronization pull request
+        if: steps.merge.outputs.changed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for number in $(gh pr list --state open --head automation/sync-upstream --json number --jq '.[].number'); do
+            gh pr close "$number" --comment "Upstream is already contained in main; closing this obsolete synchronization pull request."
+          done
