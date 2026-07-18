@@ -11,19 +11,28 @@ env:
   RUSTFLAGS: "-Dwarnings"
   RUSTDOCFLAGS: "-Dwarnings"
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        if: ${{ github.event.act }}
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: stable
           components: rustfmt, clippy
+
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        with:
+          tool: cargo-machete
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        with:
+          tool: cargo-deny
 
       - name: Build
         run: cargo build --all-targets
@@ -31,11 +40,12 @@ jobs:
       - name: Run tests
         run: |
           cargo test
+          cargo test --all-features
           cd macros
           cargo test
 
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets --all-features --no-deps
 
       - name: Fmt
         run: cargo fmt --all -- --check
@@ -45,3 +55,9 @@ jobs:
           cargo doc --all-features --no-deps
           cd macros
           cargo doc --all-features --no-deps
+
+      - name: Unused dependencies
+        run: cargo machete
+
+      - name: Check dependencies licences are compatible
+        run: cargo deny check licenses
