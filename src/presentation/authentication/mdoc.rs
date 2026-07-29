@@ -184,4 +184,100 @@ mod tests {
             transcript
         );
     }
+
+    #[test]
+    fn raw_payload_matches_multipaz_device_authentication_encoding() {
+        // Interoperability vector captured from the unmodified OIDF verifier
+        // suite's Multipaz wallet at commit dee9a25160e789f0f80517674693ef7989ab9fa1.
+        // Keeping the expected bytes here tests this crate without patching or
+        // weakening the external compliance suite that exposed the defect.
+        let transcript = hex::decode(
+            "83f6f682714f70656e494434565048616e646f76657258208de8445cdf79e416\
+             aa68efad62b314f1d837dc31d12518d3027a3684fd72ad0c",
+        )
+        .unwrap();
+        let namespaces = Tag24::new(BTreeMap::new()).unwrap();
+
+        let payload =
+            raw_device_authentication_payload(&transcript, "org.iso.18013.5.1.mDL", &namespaces)
+                .unwrap();
+
+        assert_eq!(
+            hex::encode(payload),
+            concat!(
+                "d8185868847444657669636541757468656e7469636174696f6e",
+                "83f6f682714f70656e494434565048616e646f76657258208de8445cdf79e416",
+                "aa68efad62b314f1d837dc31d12518d3027a3684fd72ad0c",
+                "756f72672e69736f2e31383031332e352e312e6d444c",
+                "d81841a0"
+            )
+        );
+    }
+
+    #[test]
+    fn rustcrypto_accepts_multipaz_device_signature() {
+        use p256::ecdsa::signature::Verifier as _;
+
+        let x = hex::decode("83c9cec471e04ee83e23fd7bfa3bc287a439803c8f57c9798c4cce6bd4d129c5")
+            .unwrap();
+        let y = hex::decode("3399f39ebc77152e320108045355521527d183873b7fb6658b2ab6bd5a7f60af")
+            .unwrap();
+        let point = p256::EncodedPoint::from_affine_coordinates(
+            GenericArray::from_slice(&x),
+            GenericArray::from_slice(&y),
+            false,
+        );
+        let key = VerifyingKey::from_encoded_point(&point).unwrap();
+        let signature = Signature::from_slice(
+            &hex::decode(
+                "8e66dedf4886cdddd75698e30bceeaeb677d7a18a2049d374032264e87f3bb7a\
+                 bfc6d67a732c69c5210667e8da4477a2805f1fcb40167e14f4502860b151c018",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let sig_structure = hex::decode(
+            "846a5369676e61747572653143a1012640586cd818586884744465766963654175\
+             7468656e7469636174696f6e83f6f682714f70656e494434565048616e646f7665\
+             7258208de8445cdf79e416aa68efad62b314f1d837dc31d12518d3027a3684fd72\
+             ad0c756f72672e69736f2e31383031332e352e312e6d444cd81841a0",
+        )
+        .unwrap();
+
+        key.verify(&sig_structure, &signature).unwrap();
+    }
+
+    #[test]
+    fn cose_verifier_accepts_multipaz_device_signature() {
+        let x = hex::decode("83c9cec471e04ee83e23fd7bfa3bc287a439803c8f57c9798c4cce6bd4d129c5")
+            .unwrap();
+        let y = hex::decode("3399f39ebc77152e320108045355521527d183873b7fb6658b2ab6bd5a7f60af")
+            .unwrap();
+        let point = p256::EncodedPoint::from_affine_coordinates(
+            GenericArray::from_slice(&x),
+            GenericArray::from_slice(&y),
+            false,
+        );
+        let key = VerifyingKey::from_encoded_point(&point).unwrap();
+        let cose: crate::cose::MaybeTagged<coset::CoseSign1> = cbor::from_slice(
+            &hex::decode(
+                "8443a10126a0f658408e66dedf4886cdddd75698e30bceeaeb677d7a18a2049d37\
+                 4032264e87f3bb7abfc6d67a732c69c5210667e8da4477a2805f1fcb40167e14\
+                 f4502860b151c018",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let payload = hex::decode(
+            "d8185868847444657669636541757468656e7469636174696f6e83f6f682714f70\
+             656e494434565048616e646f76657258208de8445cdf79e416aa68efad62b314f\
+             1d837dc31d12518d3027a3684fd72ad0c756f72672e69736f2e31383031332e35\
+             2e312e6d444cd81841a0",
+        )
+        .unwrap();
+
+        cose.verify::<VerifyingKey, Signature>(&key, Some(&payload), None)
+            .into_result()
+            .unwrap();
+    }
 }
