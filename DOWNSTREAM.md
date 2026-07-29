@@ -1,13 +1,38 @@
 # ElevenID downstream status
 
-This repository is a temporary security fork of
-[`spruceid/isomdl`](https://github.com/spruceid/isomdl). ElevenID keeps its
-patch small, submits the same change upstream, and retires the fork when a
-safe upstream release is available.
+This repository is the maintained ElevenID fork of
+[`spruceid/isomdl`](https://github.com/spruceid/isomdl). It preserves the
+upstream Git history and Apache-2.0/MIT licensing. It is not represented as an
+official SpruceID release.
 
-Current delta: replace `ssi-jwk 0.2.1` and its `rsa 0.6.1` graph with the
-current narrowly featured `ssi-jwk` release.
+## Downstream delta
 
-Compatibility baseline: the published upstream tag `isomdl/v0.2.0`. Current
-upstream `main` contains unreleased API changes and is evaluated only through
-the reviewed synchronization pull request.
+ElevenID keeps local changes small and reviewable:
+
+1. Replace `ssi-jwk 0.2.1` and its `rsa 0.6.1` graph with the current,
+   narrowly featured `ssi-jwk` release.
+2. Normalize an explicitly empty optional `issuerSigned.nameSpaces` map to no
+   disclosed issuer-signed items. Non-empty namespace maps remain strict. This
+   is required for the representation emitted by the official OIDF wallet
+   when no claims are requested.
+
+## Upstream maintenance
+
+The `Sync upstream` GitHub workflow runs on the first day of every month and
+can also be dispatched manually. It merges the current upstream `main` into a
+dedicated synchronization branch and creates or refreshes one
+`upstream-sync` pull request.
+
+Synchronization never auto-merges. The exact upstream SHA and ElevenID base
+SHA are recorded in the pull request, normal CI is dispatched against the
+resulting head commit, and conflicts create or update a visible issue. A
+maintainer reviews the downstream delta and test results before merging.
+
+Compatibility baseline is the published upstream tag `isomdl/v0.2.0`.
+Unreleased upstream API changes are adopted only through the reviewed
+synchronization pull request. Marty consumers pin an exact fork commit.
+
+Equivalent upstream behavior may replace a downstream patch after the
+official interoperability and security suites pass against a released
+upstream version; ElevenID does not depend on upstream acceptance to maintain
+this fork.
