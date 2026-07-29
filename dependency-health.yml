@@ -4,11 +4,11 @@ dependencies:
     ecosystem: git
     owner: ElevenID
     upstream: https://github.com/spruceid/isomdl
-    current: upstream-main-plus-security-patch
-    target: upstream-release
-    status: temporary-exception
+    current: a082c3f8f66345440ef6a9714cec11614a3ea399
+    target: current-upstream-plus-reviewed-downstream-patches
+    status: maintained-fork
     decision: fork
     advisories: [GHSA-9c48-w39g-hm26, GHSA-4grx-2x9w-596c, GHSA-c38w-74pg-36hr, RUSTSEC-2023-0071]
     tracking-issue: https://github.com/ElevenID/marty-core/issues/26
-    review-after: 2026-08-17
-    rationale: The latest isomdl release pins ssi-jwk 0.2.1 and rsa 0.6.1 although mdoc uses P-256.
+    review-after: 2026-08-28
+    rationale: The latest isomdl release pins ssi-jwk 0.2.1 and rsa 0.6.1 although mdoc uses P-256. ElevenID also carries a strict compatibility correction for official OIDF empty-disclosure DeviceResponses. Monthly synchronization PRs adopt upstream changes only after the fork CI and Marty interoperability suites pass.

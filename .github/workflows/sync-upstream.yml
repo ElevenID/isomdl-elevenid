@@ -2,7 +2,7 @@ name: Sync upstream
 
 on:
   schedule:
-    - cron: "43 7 * * 1"
+    - cron: "43 7 1 * *"
   workflow_dispatch:
 
 permissions:
@@ -16,6 +16,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
@@ -31,8 +32,10 @@ jobs:
           git config user.name "elevenid-upstream-sync[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/spruceid/isomdl.git
-          git fetch --prune --tags upstream main
+          git fetch --force --prune --tags upstream main
           git switch -C automation/sync-upstream origin/main
+          echo "fork_base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -42,6 +45,7 @@ jobs:
             echo "conflict=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "sync_head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git push --force-with-lease origin automation/sync-upstream
           echo "changed=true" >> "$GITHUB_OUTPUT"
       - name: Report synchronization conflict
@@ -61,9 +65,35 @@ jobs:
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          FORK_BASE_SHA: ${{ steps.merge.outputs.fork_base_sha }}
+          SYNC_HEAD_SHA: ${{ steps.merge.outputs.sync_head_sha }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
         run: |
           gh label create upstream-sync --color 1d76db --description "Automated upstream synchronization" --force
-          gh pr create --base main --head automation/sync-upstream --title "chore: synchronize upstream isomdl" --label upstream-sync --body "Reviewed merge of the current spruceid/isomdl main branch. This pull request never merges automatically and must pass the complete fork test suite." || gh pr edit automation/sync-upstream --title "chore: synchronize upstream isomdl" --body "Reviewed merge of the current spruceid/isomdl main branch. This pull request never merges automatically and must pass the complete fork test suite."
+          body="$(cat <<EOF
+          Automated merge candidate from [spruceid/isomdl](https://github.com/spruceid/isomdl).
+
+          - ElevenID base: [$FORK_BASE_SHA](https://github.com/ElevenID/isomdl-elevenid/commit/$FORK_BASE_SHA)
+          - Upstream head: [$UPSTREAM_SHA](https://github.com/spruceid/isomdl/commit/$UPSTREAM_SHA)
+          - Resulting sync head: [$SYNC_HEAD_SHA](https://github.com/ElevenID/isomdl-elevenid/commit/$SYNC_HEAD_SHA)
+          - Fork diff: https://github.com/ElevenID/isomdl-elevenid/compare/$FORK_BASE_SHA...$SYNC_HEAD_SHA
+
+          This pull request never merges automatically. Review the downstream
+          delta and require the complete fork CI before merging.
+          EOF
+          )"
+          number="$(gh pr list --state open --head automation/sync-upstream --json number --jq '.[0].number')"
+          if [ -z "$number" ]; then
+            gh pr create --base main --head automation/sync-upstream \
+              --title "chore: synchronize upstream isomdl" \
+              --label upstream-sync --body "$body"
+          else
+            gh pr edit "$number" --title "chore: synchronize upstream isomdl" --body "$body"
+          fi
+          # Pull requests created by GITHUB_TOKEN do not recursively trigger
+          # pull_request workflows. workflow_dispatch is the documented
+          # exception, and attaches the normal CI suite to this exact head SHA.
+          gh workflow run ci.yaml --ref automation/sync-upstream
       - name: Close obsolete synchronization pull request
         if: steps.merge.outputs.changed == 'false'
         env:
