@@ -15,6 +15,15 @@ ElevenID keeps local changes small and reviewable:
    disclosed issuer-signed items. Non-empty namespace maps remain strict. This
    is required for the representation emitted by the official OIDF wallet
    when no claims are requested.
+3. Verify `DeviceAuthentication` against the verifier-owned, exact CBOR
+   `SessionTranscript` bytes. Re-encoding the transcript can produce
+   semantically equivalent CBOR with different bytes and therefore invalidate
+   a correct device signature.
+
+The third correction is covered by an ElevenID-owned regression harness using
+the observed OIDF Multipaz interoperability vector. The harness is not
+represented as an official OIDF test, and no imported compliance-suite source,
+selection, assertion, fixture, or expected result is modified to make it pass.
 
 ## Upstream maintenance
 
