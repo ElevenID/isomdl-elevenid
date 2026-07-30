@@ -27,6 +27,10 @@ Synchronization never auto-merges. The exact upstream SHA and ElevenID base
 SHA are recorded in the pull request, normal CI is dispatched against the
 resulting head commit, and conflicts create or update a visible issue. A
 maintainer reviews the downstream delta and test results before merging.
+Synchronization pull requests must use a merge commit rather than squash or
+rebase so the upstream SHA remains an ancestor of `main`; this prevents the
+same upstream history from being proposed again. This exception applies only
+to upstream synchronization pull requests.
 
 Compatibility baseline is the published upstream tag `isomdl/v0.2.0`.
 Unreleased upstream API changes are adopted only through the reviewed

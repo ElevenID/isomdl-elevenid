@@ -80,6 +80,10 @@ jobs:
 
           This pull request never merges automatically. Review the downstream
           delta and require the complete fork CI before merging.
+
+          Merge this synchronization pull request with a merge commit. Do not
+          squash or rebase it: preserving the upstream commit as an ancestor
+          prevents the same upstream history from being proposed again.
           EOF
           )"
           number="$(gh pr list --state open --head automation/sync-upstream --json number --jq '.[0].number')"
