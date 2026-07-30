@@ -92,8 +92,10 @@ jobs:
           fi
           # Pull requests created by GITHUB_TOKEN do not recursively trigger
           # pull_request workflows. workflow_dispatch is the documented
-          # exception, and attaches the normal CI suite to this exact head SHA.
+          # exception, and attaches both required check suites to this exact
+          # head SHA.
           gh workflow run ci.yaml --ref automation/sync-upstream
+          gh workflow run organization-quality.yml --ref automation/sync-upstream
       - name: Close obsolete synchronization pull request
         if: steps.merge.outputs.changed == 'false'
         env:

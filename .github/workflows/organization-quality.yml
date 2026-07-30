@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Synchronization pull requests are created with GITHUB_TOKEN, which does
+  # not recursively trigger pull_request workflows. The sync workflow
+  # dispatches this check against the exact synchronization branch instead.
+  workflow_dispatch:
 
 permissions:
   contents: read
