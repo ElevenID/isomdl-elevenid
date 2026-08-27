@@ -19,11 +19,25 @@ ElevenID keeps local changes small and reviewable:
    `SessionTranscript` bytes. Re-encoding the transcript can produce
    semantically equivalent CBOR with different bytes and therefore invalidate
    a correct device signature.
+4. Separate mdoc digest planning, execution, and assembly behind a fail-closed
+   scalar executor. Issuance allocates randomness before executor dispatch and
+   restores results by stable, per-call identity; scalar execution remains the
+   default and signing is unchanged.
 
 The third correction is covered by an ElevenID-owned regression harness using
 the observed OIDF Multipaz interoperability vector. The harness is not
 represented as an official OIDF test, and no imported compliance-suite source,
 selection, assertion, fixture, or expected result is modified to make it pass.
+
+The fourth change is a proof boundary, not a parallel-performance claim.
+Fixed-randomness differential tests cover real items, decoys, all supported
+SHA-2 algorithms, multiple namespaces, reordered results, and exact MSO and
+signature-payload bytes. Malformed and incomplete executor results fail before
+a prepared credential is returned. Executor inputs can contain sensitive
+claims and therefore remain inside the issuer's trusted process; signing keys
+and signer handles never cross the executor boundary. Criterion fixtures track
+end-to-end preparation and scalar digest throughput without logging per-item
+metadata.
 
 ## Upstream maintenance
 
