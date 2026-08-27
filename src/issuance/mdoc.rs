@@ -475,8 +475,19 @@ where
     namespaces
         .into_iter()
         .map(|(name, elements)| {
-            to_issuer_signed_items(elements, rng)
+            let mut used_ids = HashSet::with_capacity(elements.len());
+            elements
                 .into_iter()
+                .map(|(key, value)| {
+                    let digest_id = generate_digest_id(&mut used_ids, rng);
+                    let random = Vec::from(rng.gen::<[u8; 16]>()).into();
+                    IssuerSignedItem {
+                        digest_id,
+                        random,
+                        element_identifier: key,
+                        element_value: value,
+                    }
+                })
                 .map(Tag24::new)
                 .collect::<Result<Vec<Tag24<IssuerSignedItem>>, _>>()
                 .map_err(|err| anyhow!("unable to encode IssuerSignedItem as cbor: {}", err))
@@ -491,28 +502,6 @@ where
             NonEmptyMap::try_from(namespaces)
                 .map_err(|_| anyhow!("at least one namespace required"))
         })
-}
-
-fn to_issuer_signed_items<R>(
-    elements: BTreeMap<String, ciborium::Value>,
-    rng: &mut R,
-) -> Vec<IssuerSignedItem>
-where
-    R: Rng + ?Sized,
-{
-    let mut used_ids = HashSet::with_capacity(elements.len());
-    let mut items = Vec::with_capacity(elements.len());
-    for (key, value) in elements {
-        let digest_id = generate_digest_id(&mut used_ids, rng);
-        let random = Vec::from(rng.gen::<[u8; 16]>()).into();
-        items.push(IssuerSignedItem {
-            digest_id,
-            random,
-            element_identifier: key,
-            element_value: value,
-        });
-    }
-    items
 }
 
 const MDOC_CREDENTIAL_ID: u64 = 0;
