@@ -657,6 +657,89 @@ fn assemble_digest_namespaces(
     plan: &MdocDigestPlan,
     results: Vec<DigestResult>,
 ) -> Result<BTreeMap<String, DigestIds>> {
+    if results_follow_plan_order(plan, &results) {
+        return assemble_ordered_digest_namespaces(plan, results);
+    }
+
+    assemble_reordered_digest_namespaces(plan, results)
+}
+
+fn results_follow_plan_order(plan: &MdocDigestPlan, results: &[DigestResult]) -> bool {
+    results.len() == plan.jobs.len()
+        && plan.jobs.iter().zip(results).all(|(job, result)| {
+            (job.credential_id, job.job_id) == (result.credential_id, result.job_id)
+                && job.ordinal == result.ordinal
+        })
+}
+
+fn assemble_ordered_digest_namespaces(
+    plan: &MdocDigestPlan,
+    results: Vec<DigestResult>,
+) -> Result<BTreeMap<String, DigestIds>> {
+    let mut results = results.into_iter();
+    let mut jobs = plan.jobs.iter();
+    let mut namespaces = BTreeMap::new();
+    let mut expected_job_id = 0u64;
+
+    for namespace in &plan.namespaces {
+        let mut digest_ids = BTreeMap::new();
+        for planned_digest in &namespace.digests {
+            let job = jobs
+                .next()
+                .ok_or_else(|| anyhow!("mdoc digest plan references an unknown job"))?;
+            let result = results
+                .next()
+                .ok_or_else(|| anyhow!("digest executor omitted a planned result"))?;
+            if (job.credential_id, job.job_id) != (MDOC_CREDENTIAL_ID, expected_job_id) {
+                return Err(anyhow!("mdoc digest plan contains duplicate job identity"));
+            }
+            if (planned_digest.credential_id, planned_digest.job_id)
+                != (job.credential_id, job.job_id)
+            {
+                return Err(anyhow!("mdoc digest plan references an unknown job"));
+            }
+            if (result.credential_id, result.job_id) != (job.credential_id, job.job_id) {
+                return Err(anyhow!("digest executor changed result identity metadata"));
+            }
+            if result.ordinal != job.ordinal {
+                return Err(anyhow!("digest executor changed result identity metadata"));
+            }
+            if result.digest.len() != digest_length(job.algorithm) {
+                return Err(anyhow!("digest executor returned an invalid digest length"));
+            }
+            if digest_ids
+                .insert(planned_digest.digest_id, result.digest.into())
+                .is_some()
+            {
+                return Err(anyhow!(
+                    "mdoc digest plan contains a duplicate digest ID within a namespace"
+                ));
+            }
+            expected_job_id = expected_job_id
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("too many mdoc digest jobs"))?;
+        }
+        if namespaces
+            .insert(namespace.name.clone(), digest_ids)
+            .is_some()
+        {
+            return Err(anyhow!("mdoc digest plan contains a duplicate namespace"));
+        }
+    }
+    if jobs.next().is_some() {
+        return Err(anyhow!("mdoc digest plan contains an unreferenced job"));
+    }
+    if results.next().is_some() {
+        return Err(anyhow!("digest executor returned an unexpected result"));
+    }
+
+    Ok(namespaces)
+}
+
+fn assemble_reordered_digest_namespaces(
+    plan: &MdocDigestPlan,
+    results: Vec<DigestResult>,
+) -> Result<BTreeMap<String, DigestIds>> {
     let mut results_by_identity = BTreeMap::new();
     let mut duplicate_result = false;
     for result in results {
@@ -1047,6 +1130,49 @@ pub mod test {
             if !results.is_empty() {
                 let rotation = self.rotation % results.len();
                 results.rotate_left(rotation);
+            }
+            Ok(results)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ResultSetFault {
+        ExtraFirst,
+        DuplicateFuture,
+        MissingFirst,
+        InvalidLengthAndDuplicate,
+    }
+
+    #[derive(Debug)]
+    struct FaultyDigestExecutor(ResultSetFault);
+
+    impl DigestExecutor for FaultyDigestExecutor {
+        fn execute(
+            &self,
+            jobs: &[DigestJob],
+        ) -> std::result::Result<Vec<DigestResult>, DigestExecutionError> {
+            let mut results = SerialDigestExecutor.execute(jobs)?;
+            match self.0 {
+                ResultSetFault::ExtraFirst => {
+                    let mut result = results
+                        .last()
+                        .cloned()
+                        .expect("the mdoc fixture must produce digest jobs");
+                    result.credential_id = u64::MAX;
+                    result.job_id = u64::MAX;
+                    result.ordinal = usize::MAX;
+                    results.insert(0, result);
+                }
+                ResultSetFault::DuplicateFuture => {
+                    results[0] = results[1].clone();
+                }
+                ResultSetFault::MissingFirst => {
+                    results.remove(0);
+                }
+                ResultSetFault::InvalidLengthAndDuplicate => {
+                    results[0].digest.pop();
+                    results.push(results[1].clone());
+                }
             }
             Ok(results)
         }
@@ -1497,6 +1623,54 @@ pub mod test {
         .expect_err("executor failure must not produce a prepared credential");
 
         assert_eq!(error.to_string(), "digest execution failed");
+    }
+
+    #[test]
+    fn public_assembly_preserves_result_error_precedence() {
+        for (fault, expected_error) in [
+            (
+                ResultSetFault::ExtraFirst,
+                "digest executor returned an unexpected result",
+            ),
+            (
+                ResultSetFault::DuplicateFuture,
+                "digest executor returned duplicate result identity",
+            ),
+            (
+                ResultSetFault::MissingFirst,
+                "digest executor omitted a planned result",
+            ),
+            (
+                ResultSetFault::InvalidLengthAndDuplicate,
+                "digest executor returned duplicate result identity",
+            ),
+        ] {
+            let Builder {
+                doc_type: Some(doc_type),
+                namespaces: Some(namespaces),
+                validity_info: Some(validity_info),
+                digest_algorithm: Some(digest_algorithm),
+                device_key_info: Some(device_key_info),
+                ..
+            } = minimal_test_mdoc_builder()
+            else {
+                unreachable!("the minimal mdoc builder has every required input")
+            };
+
+            let error = Mdoc::prepare_with_digest_executor(
+                doc_type,
+                namespaces,
+                validity_info,
+                digest_algorithm,
+                device_key_info,
+                Algorithm::ES256,
+                false,
+                &FaultyDigestExecutor(fault),
+            )
+            .expect_err("a malformed result set must fail closed");
+
+            assert_eq!(error.to_string(), expected_error);
+        }
     }
 
     #[test]
