@@ -748,6 +748,7 @@ pub mod test {
     use rand::rngs::StdRng;
     use rand::{RngCore, SeedableRng};
     use sha2::{Digest, Sha256, Sha384, Sha512};
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use time::OffsetDateTime;
 
@@ -799,6 +800,43 @@ pub mod test {
     }
 
     impl rand::CryptoRng for ReplayRng {}
+
+    #[derive(Debug)]
+    struct U32SequenceRng {
+        values: VecDeque<u32>,
+    }
+
+    impl U32SequenceRng {
+        fn new(values: impl IntoIterator<Item = u32>) -> Self {
+            Self {
+                values: values.into_iter().collect(),
+            }
+        }
+    }
+
+    impl RngCore for U32SequenceRng {
+        fn next_u32(&mut self) -> u32 {
+            self.values
+                .pop_front()
+                .expect("the test sequence must contain enough values")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            u64::from(self.next_u32()) | (u64::from(self.next_u32()) << 32)
+        }
+
+        fn fill_bytes(&mut self, destination: &mut [u8]) {
+            for chunk in destination.chunks_mut(4) {
+                let bytes = self.next_u32().to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+            self.fill_bytes(destination);
+            Ok(())
+        }
+    }
 
     fn isomdl_data() -> serde_json::Value {
         serde_json::json!(
@@ -1182,6 +1220,20 @@ pub mod test {
 
         assert_eq!(legacy, filled);
         assert_eq!(legacy_tail, fill_tail);
+    }
+
+    #[test]
+    fn digest_id_generation_retries_collisions_in_order() {
+        let mut used_ids = [DigestId::new(7)].into_iter().collect();
+        let mut rng = U32SequenceRng::new([7, 7, 42, 99]);
+
+        let digest_id = generate_digest_id(&mut used_ids, &mut rng);
+
+        assert_eq!(digest_id, DigestId::new(42));
+        assert_eq!(rng.next_u32(), 99);
+        assert_eq!(used_ids.len(), 2);
+        assert!(used_ids.contains(&DigestId::new(7)));
+        assert!(used_ids.contains(&DigestId::new(42)));
     }
 
     #[test]
@@ -1782,8 +1834,9 @@ pub mod test {
         items: &[IssuerSignedItemBytes],
         algorithm: DigestAlgorithm,
         enable_decoy_digests: bool,
+        seed: u64,
     ) -> anyhow::Result<DigestIds> {
-        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+        let mut rng = StdRng::seed_from_u64(seed);
         let mut jobs = Vec::new();
         let mut next_job_id = 0;
         let digests = plan_digest_namespace(
@@ -1835,7 +1888,7 @@ pub mod test {
                 ],
             ),
         ] {
-            let digests = digest_fixed_items(&items, algorithm, false)?;
+            let digests = digest_fixed_items(&items, algorithm, false, 0x4344_4c41)?;
             for (digest_id, expected) in [DigestId::new(7), DigestId::new(42)]
                 .into_iter()
                 .zip(expected)
@@ -1855,8 +1908,12 @@ pub mod test {
         let items = fixed_digest_items();
         let item = &items[0];
         let wrapper_bytes = crate::cbor::to_vec(item)?;
-        let digests =
-            digest_fixed_items(std::slice::from_ref(item), DigestAlgorithm::SHA256, false)?;
+        let digests = digest_fixed_items(
+            std::slice::from_ref(item),
+            DigestAlgorithm::SHA256,
+            false,
+            0x4344_4c41,
+        )?;
         let actual = digests.get(&DigestId::new(7)).unwrap().as_ref();
 
         assert_eq!(actual, Sha256::digest(wrapper_bytes).as_slice());
@@ -1872,13 +1929,16 @@ pub mod test {
             (DigestAlgorithm::SHA384, 48),
             (DigestAlgorithm::SHA512, 64),
         ] {
-            for _ in 0..32 {
-                let digests = digest_fixed_items(&items, algorithm, true)?;
+            let mut observed_counts = HashSet::new();
+            for seed in 0..32 {
+                let digests = digest_fixed_items(&items, algorithm, true, seed)?;
                 assert!((items.len() + 5..=items.len() + 9).contains(&digests.len()));
                 assert!(digests
                     .values()
                     .all(|digest| digest.as_ref().len() == digest_length));
+                observed_counts.insert(digests.len());
             }
+            assert!(observed_counts.len() > 1);
         }
         Ok(())
     }
