@@ -460,6 +460,7 @@ pub mod test {
     use p256::ecdsa::{Signature, SigningKey};
     use p256::pkcs8::DecodePrivateKey;
     use p256::SecretKey;
+    use sha2::{Digest, Sha256};
     use time::OffsetDateTime;
 
     use crate::definitions::device_key::cose_key::{CoseKey, EC2Curve, EC2Y};
@@ -625,6 +626,32 @@ pub mod test {
             .device_key_info(device_key_info)
     }
 
+    #[test]
+    fn empty_namespace_set_error_is_stable() {
+        let error = minimal_test_mdoc_builder()
+            .namespaces(BTreeMap::new())
+            .prepare(Algorithm::ES256)
+            .expect_err("an mdoc without namespaces must be rejected");
+
+        assert_eq!(error.to_string(), "at least one namespace required");
+    }
+
+    #[test]
+    fn empty_namespace_error_is_stable() {
+        let namespaces = [("org.iso.18013.5.1".to_owned(), BTreeMap::new())]
+            .into_iter()
+            .collect();
+        let error = minimal_test_mdoc_builder()
+            .namespaces(namespaces)
+            .prepare(Algorithm::ES256)
+            .expect_err("an empty namespace must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "at least one element required in each namespace"
+        );
+    }
+
     pub fn minimal_test_mdoc() -> anyhow::Result<Mdoc> {
         let mdoc_builder = minimal_test_mdoc_builder();
 
@@ -640,6 +667,99 @@ pub mod test {
         Ok(mdoc_builder
             .issue::<SigningKey, Signature>(x5chain, signer)
             .expect("failed to issue mdoc"))
+    }
+
+    fn fixed_digest_items() -> Vec<IssuerSignedItemBytes> {
+        vec![
+            Tag24::new(IssuerSignedItem {
+                digest_id: DigestId::new(7),
+                random: vec![0x11; 16].into(),
+                element_identifier: "family_name".to_owned(),
+                element_value: ciborium::Value::Text("Doe".to_owned()),
+            })
+            .unwrap(),
+            Tag24::new(IssuerSignedItem {
+                digest_id: DigestId::new(42),
+                random: vec![0xa5; 16].into(),
+                element_identifier: "age_over_21".to_owned(),
+                element_value: ciborium::Value::Bool(true),
+            })
+            .unwrap(),
+        ]
+    }
+
+    #[test]
+    fn fixed_item_digest_vectors() -> anyhow::Result<()> {
+        let items = fixed_digest_items();
+
+        for (algorithm, expected) in [
+            (
+                DigestAlgorithm::SHA256,
+                [
+                    "e36bd25994498a512266bf3a676c3730397a372cc84272ae66ffaee7669ab945",
+                    "b94ad03a2048d101a1760a776e954ebc024745765a1b56961e33cd54baa54e9f",
+                ],
+            ),
+            (
+                DigestAlgorithm::SHA384,
+                [
+                    "a535280fcf68eaa61d60766757a86bb3c15e9fa47f6eee12f225ce533b9ac381ba6201e98484dce684ce120f7b15353b",
+                    "f20df420a735a76cc6faf6cbe2ea74dcad19592b62b2f495a70300922e930189a860255b1355d8998e8015a1cbda2cb5",
+                ],
+            ),
+            (
+                DigestAlgorithm::SHA512,
+                [
+                    "fc81b2b1f4398f3583543b65f9d7e960ee77136ed7ca3d17ccb7cc4d65badbc1f4fac6e8e03b191e30d642a3f3fbe00316acee20a9bcbfdd152beb13b917c2bf",
+                    "c619cb13f3b860c7d270d4fe5e585e22c0f9318eae80f412ed980d410a399d377c7c7f80956fb78ca20606842fbb074328d297f1e0126f7e32d6d3e22a9f5662",
+                ],
+            ),
+        ] {
+            let digests = digest_namespace(&items, algorithm, false)?;
+            for (digest_id, expected) in [DigestId::new(7), DigestId::new(42)]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_eq!(
+                    hex::encode(digests.get(&digest_id).unwrap().as_ref()),
+                    expected
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn real_item_digest_covers_the_tag24_wrapper() -> anyhow::Result<()> {
+        let items = fixed_digest_items();
+        let item = &items[0];
+        let wrapper_bytes = crate::cbor::to_vec(item)?;
+        let digests = digest_namespace(std::slice::from_ref(item), DigestAlgorithm::SHA256, false)?;
+        let actual = digests.get(&DigestId::new(7)).unwrap().as_ref();
+
+        assert_eq!(actual, Sha256::digest(wrapper_bytes).as_slice());
+        assert_ne!(actual, Sha256::digest(&item.inner_bytes).as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn decoy_digest_count_and_lengths_match_existing_behavior() -> anyhow::Result<()> {
+        let items = fixed_digest_items();
+        for (algorithm, digest_length) in [
+            (DigestAlgorithm::SHA256, 32),
+            (DigestAlgorithm::SHA384, 48),
+            (DigestAlgorithm::SHA512, 64),
+        ] {
+            for _ in 0..32 {
+                let digests = digest_namespace(&items, algorithm, true)?;
+                assert!((items.len() + 5..=items.len() + 9).contains(&digests.len()));
+                assert!(digests
+                    .values()
+                    .all(|digest| digest.as_ref().len() == digest_length));
+            }
+        }
+        Ok(())
     }
 
     #[test]
