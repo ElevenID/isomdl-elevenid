@@ -4,13 +4,15 @@ use anyhow::{anyhow, Result};
 use async_signature::AsyncSigner;
 use coset::iana::Algorithm;
 use coset::{CoseSign1, Label};
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, Sha384, Sha512};
 use signature::{SignatureEncoding, Signer};
 
 use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::{MaybeTagged, SignatureAlgorithm};
+use crate::digest_executor::{
+    digest_length, DigestExecutor, DigestJob, DigestResult, SerialDigestExecutor,
+};
 use crate::{
     definitions::x509::x5chain::{X5Chain, X5CHAIN_COSE_HEADER_LABEL},
     definitions::{
@@ -69,11 +71,71 @@ impl Mdoc {
         if let Some(authorizations) = &device_key_info.key_authorizations {
             authorizations.validate()?;
         }
+        // Invalid shapes fail before RNG allocation. Error values match the
+        // legacy path; failed calls do not promise preservation of RNG state.
+        validate_namespace_shape(&namespaces)?;
+        let mut rng = rand::thread_rng();
+        Self::prepare_with_validated_inputs_rng_and_digest_executor(
+            doc_type,
+            namespaces,
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            signature_algorithm,
+            enable_decoy_digests,
+            &mut rng,
+            &SerialDigestExecutor,
+        )
+    }
 
-        let issuer_namespaces = to_issuer_namespaces(namespaces)?;
-        let value_digests =
-            digest_namespaces(&issuer_namespaces, digest_algorithm, enable_decoy_digests)?;
+    // The public entry point validates authorizations and namespace shape
+    // before constructing its RNG. Test callers use already-valid fixtures.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_validated_inputs_rng_and_digest_executor<R, E>(
+        doc_type: String,
+        namespaces: Namespaces,
+        validity_info: ValidityInfo,
+        digest_algorithm: DigestAlgorithm,
+        device_key_info: DeviceKeyInfo,
+        signature_algorithm: Algorithm,
+        enable_decoy_digests: bool,
+        rng: &mut R,
+        digest_executor: &E,
+    ) -> Result<PreparedMdoc>
+    where
+        R: CryptoRng + Rng + ?Sized,
+        E: DigestExecutor + ?Sized,
+    {
+        let issuer_namespaces = to_issuer_namespaces(namespaces, rng)?;
+        let digest_plan = plan_digest_namespaces(
+            &issuer_namespaces,
+            digest_algorithm,
+            enable_decoy_digests,
+            rng,
+        )?;
+        let digest_results = digest_executor.execute(&digest_plan.jobs)?;
+        let value_digests = assemble_digest_namespaces(&digest_plan, digest_results)?;
 
+        Self::finish_preparation(
+            doc_type,
+            issuer_namespaces,
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            signature_algorithm,
+            value_digests,
+        )
+    }
+
+    fn finish_preparation(
+        doc_type: String,
+        issuer_namespaces: IssuerNamespaces,
+        validity_info: ValidityInfo,
+        digest_algorithm: DigestAlgorithm,
+        device_key_info: DeviceKeyInfo,
+        signature_algorithm: Algorithm,
+        value_digests: BTreeMap<String, DigestIds>,
+    ) -> Result<PreparedMdoc> {
         let mso = Mso {
             version: "1.0".to_string(),
             digest_algorithm,
@@ -348,11 +410,25 @@ impl Builder {
     }
 }
 
-fn to_issuer_namespaces(namespaces: Namespaces) -> Result<IssuerNamespaces> {
+fn validate_namespace_shape(namespaces: &Namespaces) -> Result<()> {
+    if namespaces.is_empty() {
+        return Err(anyhow!("at least one namespace required"));
+    }
+    if namespaces.values().any(BTreeMap::is_empty) {
+        return Err(anyhow!("at least one element required in each namespace"));
+    }
+    Ok(())
+}
+
+fn to_issuer_namespaces<R>(namespaces: Namespaces, rng: &mut R) -> Result<IssuerNamespaces>
+where
+    R: Rng + ?Sized,
+{
     namespaces
         .into_iter()
         .map(|(name, elements)| {
-            to_issuer_signed_items(elements)
+            to_issuer_signed_items(elements, rng)
+                .into_iter()
                 .map(Tag24::new)
                 .collect::<Result<Vec<Tag24<IssuerSignedItem>>, _>>()
                 .map_err(|err| anyhow!("unable to encode IssuerSignedItem as cbor: {}", err))
@@ -369,84 +445,246 @@ fn to_issuer_namespaces(namespaces: Namespaces) -> Result<IssuerNamespaces> {
         })
 }
 
-fn to_issuer_signed_items(
+fn to_issuer_signed_items<R>(
     elements: BTreeMap<String, ciborium::Value>,
-) -> impl Iterator<Item = IssuerSignedItem> {
-    let mut used_ids = HashSet::new();
-    elements.into_iter().map(move |(key, value)| {
-        let digest_id = generate_digest_id(&mut used_ids);
-        let random = Vec::from(rand::thread_rng().gen::<[u8; 16]>()).into();
-        IssuerSignedItem {
+    rng: &mut R,
+) -> Vec<IssuerSignedItem>
+where
+    R: Rng + ?Sized,
+{
+    let mut used_ids = HashSet::with_capacity(elements.len());
+    let mut items = Vec::with_capacity(elements.len());
+    for (key, value) in elements {
+        let digest_id = generate_digest_id(&mut used_ids, rng);
+        let random = Vec::from(rng.gen::<[u8; 16]>()).into();
+        items.push(IssuerSignedItem {
             digest_id,
             random,
             element_identifier: key,
             element_value: value,
-        }
-    })
+        });
+    }
+    items
 }
 
-fn digest_namespaces(
+const MDOC_CREDENTIAL_ID: u64 = 0;
+const DECOY_BYTES_LENGTH: usize = 512;
+
+#[derive(Clone, Eq, PartialEq)]
+struct MdocDigestPlan {
+    namespaces: Vec<PlannedMdocNamespace>,
+    jobs: Vec<DigestJob>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct PlannedMdocNamespace {
+    name: String,
+    digests: Vec<PlannedMdocDigest>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct PlannedMdocDigest {
+    credential_id: u64,
+    job_id: u64,
+    digest_id: DigestId,
+}
+
+fn plan_digest_namespaces<R>(
     namespaces: &IssuerNamespaces,
     digest_algorithm: DigestAlgorithm,
     enable_decoy_digests: bool,
-) -> Result<BTreeMap<String, DigestIds>> {
-    namespaces
-        .iter()
-        .map(|(name, elements)| {
-            Ok((
-                name.clone(),
-                digest_namespace(elements, digest_algorithm, enable_decoy_digests)?,
-            ))
-        })
-        .collect()
+    rng: &mut R,
+) -> Result<MdocDigestPlan>
+where
+    R: Rng + ?Sized,
+{
+    let item_count = namespaces.values().map(|elements| elements.len()).sum();
+    let mut plan = MdocDigestPlan {
+        namespaces: Vec::with_capacity(namespaces.len()),
+        jobs: Vec::with_capacity(item_count),
+    };
+    let mut next_job_id = 0;
+
+    for (name, elements) in namespaces.iter() {
+        plan.namespaces.push(PlannedMdocNamespace {
+            name: name.clone(),
+            digests: plan_digest_namespace(
+                elements,
+                digest_algorithm,
+                enable_decoy_digests,
+                rng,
+                &mut next_job_id,
+                &mut plan.jobs,
+            )?,
+        });
+    }
+
+    Ok(plan)
 }
 
-fn digest_namespace(
+fn plan_digest_namespace<R>(
     elements: &[IssuerSignedItemBytes],
     digest_algorithm: DigestAlgorithm,
     enable_decoy_digests: bool,
-) -> Result<DigestIds> {
-    let mut used_ids = elements
-        .iter()
-        .map(|item| item.as_ref().digest_id)
-        .collect();
+    rng: &mut R,
+    next_job_id: &mut u64,
+    jobs: &mut Vec<DigestJob>,
+) -> Result<Vec<PlannedMdocDigest>>
+where
+    R: Rng + ?Sized,
+{
+    let decoy_count = if enable_decoy_digests {
+        rng.gen_range(5..10)
+    } else {
+        0
+    };
+    let mut used_ids = HashSet::with_capacity(elements.len() + decoy_count);
+    used_ids.extend(elements.iter().map(|item| item.as_ref().digest_id));
 
-    // Generate X random digests to avoid leaking information.
-    let random_ids = std::iter::repeat_with(|| generate_digest_id(&mut used_ids));
-    let random_bytes = std::iter::repeat_with(|| {
-        std::iter::repeat_with(|| rand::thread_rng().gen::<u8>())
-            .take(512)
-            .collect()
-    });
-    let random_digests = random_ids
-        .zip(random_bytes)
-        .map(Result::<_, anyhow::Error>::Ok)
-        .take(if enable_decoy_digests {
-            rand::thread_rng().gen_range(5..10)
-        } else {
-            0
-        });
+    jobs.reserve(elements.len() + decoy_count);
+    let mut planned_digests = Vec::with_capacity(elements.len() + decoy_count);
 
-    elements
-        .iter()
-        .map(|item| Ok((item.as_ref().digest_id, crate::cbor::to_vec(item)?)))
-        .chain(random_digests)
-        .map(|result| {
-            let (digest_id, bytes) = result?;
-            let digest = match digest_algorithm {
-                DigestAlgorithm::SHA256 => Sha256::digest(bytes).to_vec(),
-                DigestAlgorithm::SHA384 => Sha384::digest(bytes).to_vec(),
-                DigestAlgorithm::SHA512 => Sha512::digest(bytes).to_vec(),
-            };
-            Ok((digest_id, digest.into()))
-        })
-        .collect()
+    for (ordinal, item) in elements.iter().enumerate() {
+        push_planned_digest(
+            item.as_ref().digest_id,
+            ordinal,
+            digest_algorithm,
+            crate::cbor::to_vec(item)?,
+            next_job_id,
+            jobs,
+            &mut planned_digests,
+        )?;
+    }
+
+    // Generate random digests to avoid leaking the number of real items.
+    for decoy_ordinal in 0..decoy_count {
+        let digest_id = generate_digest_id(&mut used_ids, rng);
+        let bytes = std::iter::repeat_with(|| rng.gen::<u8>())
+            .take(DECOY_BYTES_LENGTH)
+            .collect();
+        push_planned_digest(
+            digest_id,
+            elements.len() + decoy_ordinal,
+            digest_algorithm,
+            bytes,
+            next_job_id,
+            jobs,
+            &mut planned_digests,
+        )?;
+    }
+
+    Ok(planned_digests)
 }
 
-fn generate_digest_id(used_ids: &mut HashSet<DigestId>) -> DigestId {
+#[allow(clippy::too_many_arguments)]
+fn push_planned_digest(
+    digest_id: DigestId,
+    ordinal: usize,
+    algorithm: DigestAlgorithm,
+    input: Vec<u8>,
+    next_job_id: &mut u64,
+    jobs: &mut Vec<DigestJob>,
+    planned_digests: &mut Vec<PlannedMdocDigest>,
+) -> Result<()> {
+    let job_id = *next_job_id;
+    *next_job_id = next_job_id
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("too many mdoc digest jobs"))?;
+
+    jobs.push(DigestJob {
+        credential_id: MDOC_CREDENTIAL_ID,
+        job_id,
+        ordinal,
+        algorithm,
+        input,
+    });
+    planned_digests.push(PlannedMdocDigest {
+        credential_id: MDOC_CREDENTIAL_ID,
+        job_id,
+        digest_id,
+    });
+    Ok(())
+}
+
+fn assemble_digest_namespaces(
+    plan: &MdocDigestPlan,
+    results: Vec<DigestResult>,
+) -> Result<BTreeMap<String, DigestIds>> {
+    let mut results_by_identity = BTreeMap::new();
+    let mut duplicate_result = false;
+    for result in results {
+        let identity = (result.credential_id, result.job_id);
+        if results_by_identity.insert(identity, result).is_some() {
+            duplicate_result = true;
+        }
+    }
+    if duplicate_result {
+        return Err(anyhow!(
+            "digest executor returned duplicate result identity"
+        ));
+    }
+
+    let mut digests_by_identity = BTreeMap::new();
+    let mut expected_identities = HashSet::with_capacity(plan.jobs.len());
+    for job in &plan.jobs {
+        let identity = (job.credential_id, job.job_id);
+        if !expected_identities.insert(identity) {
+            return Err(anyhow!("mdoc digest plan contains duplicate job identity"));
+        }
+
+        let result = results_by_identity
+            .remove(&identity)
+            .ok_or_else(|| anyhow!("digest executor omitted a planned result"))?;
+        if result.ordinal != job.ordinal {
+            return Err(anyhow!("digest executor changed result identity metadata"));
+        }
+        if result.digest.len() != digest_length(job.algorithm) {
+            return Err(anyhow!("digest executor returned an invalid digest length"));
+        }
+        digests_by_identity.insert(identity, result.digest);
+    }
+    if !results_by_identity.is_empty() {
+        return Err(anyhow!("digest executor returned an unexpected result"));
+    }
+
+    let mut namespaces = BTreeMap::new();
+    for namespace in &plan.namespaces {
+        let mut digest_ids = BTreeMap::new();
+        for planned_digest in &namespace.digests {
+            let identity = (planned_digest.credential_id, planned_digest.job_id);
+            let digest = digests_by_identity
+                .remove(&identity)
+                .ok_or_else(|| anyhow!("mdoc digest plan references an unknown job"))?;
+            if digest_ids
+                .insert(planned_digest.digest_id, digest.into())
+                .is_some()
+            {
+                return Err(anyhow!(
+                    "mdoc digest plan contains a duplicate digest ID within a namespace"
+                ));
+            }
+        }
+        if namespaces
+            .insert(namespace.name.clone(), digest_ids)
+            .is_some()
+        {
+            return Err(anyhow!("mdoc digest plan contains a duplicate namespace"));
+        }
+    }
+    if !digests_by_identity.is_empty() {
+        return Err(anyhow!("mdoc digest plan contains an unreferenced job"));
+    }
+
+    Ok(namespaces)
+}
+
+fn generate_digest_id<R>(used_ids: &mut HashSet<DigestId>, rng: &mut R) -> DigestId
+where
+    R: Rng + ?Sized,
+{
     let mut digest_id;
     loop {
-        digest_id = DigestId::new(rand::thread_rng().gen());
+        digest_id = DigestId::new(rng.gen());
         if used_ids.insert(digest_id) {
             break;
         }
@@ -460,7 +698,10 @@ pub mod test {
     use p256::ecdsa::{Signature, SigningKey};
     use p256::pkcs8::DecodePrivateKey;
     use p256::SecretKey;
-    use sha2::{Digest, Sha256};
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use sha2::{Digest, Sha256, Sha384, Sha512};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use time::OffsetDateTime;
 
     use crate::definitions::device_key::cose_key::{CoseKey, EC2Curve, EC2Y};
@@ -468,6 +709,7 @@ pub mod test {
         org_iso_18013_5_1::OrgIso1801351, org_iso_18013_5_1_aamva::OrgIso1801351Aamva,
     };
     use crate::definitions::traits::{FromJson, ToNamespaceMap};
+    use crate::digest_executor::DigestExecutionError;
 
     use super::*;
 
@@ -669,6 +911,356 @@ pub mod test {
             .expect("failed to issue mdoc"))
     }
 
+    #[derive(Debug)]
+    struct RotatingDigestExecutor {
+        rotation: usize,
+    }
+
+    impl DigestExecutor for RotatingDigestExecutor {
+        fn execute(
+            &self,
+            jobs: &[DigestJob],
+        ) -> std::result::Result<Vec<DigestResult>, DigestExecutionError> {
+            let mut results = SerialDigestExecutor.execute(jobs)?;
+            if !results.is_empty() {
+                let rotation = self.rotation % results.len();
+                results.rotate_left(rotation);
+            }
+            Ok(results)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingDigestExecutor {
+        calls: AtomicUsize,
+        jobs: AtomicUsize,
+    }
+
+    impl DigestExecutor for CountingDigestExecutor {
+        fn execute(
+            &self,
+            jobs: &[DigestJob],
+        ) -> std::result::Result<Vec<DigestResult>, DigestExecutionError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.jobs.fetch_add(jobs.len(), Ordering::Relaxed);
+            SerialDigestExecutor.execute(jobs)
+        }
+    }
+
+    fn small_namespaces() -> Namespaces {
+        [
+            (
+                "org.example.first".to_owned(),
+                [
+                    ("family_name".to_owned(), "Doe".to_owned().into()),
+                    ("given_name".to_owned(), "Jane".to_owned().into()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            (
+                "org.example.second".to_owned(),
+                [("status".to_owned(), true.into())].into_iter().collect(),
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// Reproduces the old item planning path with an injected random tape.
+    fn legacy_to_issuer_namespaces<R>(
+        namespaces: Namespaces,
+        rng: &mut R,
+    ) -> anyhow::Result<IssuerNamespaces>
+    where
+        R: Rng + ?Sized,
+    {
+        let mut issuer_namespaces = BTreeMap::new();
+        for (name, elements) in namespaces {
+            let mut used_ids = HashSet::new();
+            let mut items = Vec::new();
+            for (element_identifier, element_value) in elements {
+                let digest_id = legacy_generate_digest_id(&mut used_ids, rng);
+                let random = Vec::from(rng.gen::<[u8; 16]>()).into();
+                items.push(Tag24::new(IssuerSignedItem {
+                    digest_id,
+                    random,
+                    element_identifier,
+                    element_value,
+                })?);
+            }
+            let items = NonEmptyVec::try_from(items)
+                .map_err(|_| anyhow!("at least one element required in each namespace"))?;
+            issuer_namespaces.insert(name, items);
+        }
+        NonEmptyMap::try_from(issuer_namespaces)
+            .map_err(|_| anyhow!("at least one namespace required"))
+    }
+
+    /// Reproduces the old serial digest path, including random call order.
+    fn legacy_digest_namespaces<R>(
+        namespaces: &IssuerNamespaces,
+        digest_algorithm: DigestAlgorithm,
+        enable_decoy_digests: bool,
+        rng: &mut R,
+    ) -> anyhow::Result<BTreeMap<String, DigestIds>>
+    where
+        R: Rng + ?Sized,
+    {
+        let mut value_digests = BTreeMap::new();
+        for (name, elements) in namespaces.iter() {
+            let mut used_ids: HashSet<_> = elements
+                .iter()
+                .map(|item| item.as_ref().digest_id)
+                .collect();
+            let decoy_count: usize = if enable_decoy_digests {
+                rng.gen_range(5..10)
+            } else {
+                0
+            };
+            let mut digests = BTreeMap::new();
+            for item in elements.iter() {
+                let input = crate::cbor::to_vec(item)?;
+                digests.insert(
+                    item.as_ref().digest_id,
+                    legacy_digest(digest_algorithm, &input).into(),
+                );
+            }
+            for _ in 0..decoy_count {
+                let digest_id = legacy_generate_digest_id(&mut used_ids, rng);
+                let input: Vec<u8> = std::iter::repeat_with(|| rng.gen::<u8>())
+                    .take(DECOY_BYTES_LENGTH)
+                    .collect();
+                digests.insert(digest_id, legacy_digest(digest_algorithm, &input).into());
+            }
+            value_digests.insert(name.clone(), digests);
+        }
+        Ok(value_digests)
+    }
+
+    fn legacy_generate_digest_id<R>(used_ids: &mut HashSet<DigestId>, rng: &mut R) -> DigestId
+    where
+        R: Rng + ?Sized,
+    {
+        loop {
+            let digest_id = DigestId::new(rng.gen());
+            if used_ids.insert(digest_id) {
+                return digest_id;
+            }
+        }
+    }
+
+    fn legacy_digest(algorithm: DigestAlgorithm, input: &[u8]) -> Vec<u8> {
+        match algorithm {
+            DigestAlgorithm::SHA256 => Sha256::digest(input).to_vec(),
+            DigestAlgorithm::SHA384 => Sha384::digest(input).to_vec(),
+            DigestAlgorithm::SHA512 => Sha512::digest(input).to_vec(),
+        }
+    }
+
+    #[test]
+    fn serial_executor_matches_legacy_planning_for_fixed_randomness() -> anyhow::Result<()> {
+        let Builder {
+            validity_info: Some(validity_info),
+            device_key_info: Some(device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+
+        for digest_algorithm in [
+            DigestAlgorithm::SHA256,
+            DigestAlgorithm::SHA384,
+            DigestAlgorithm::SHA512,
+        ] {
+            for enable_decoy_digests in [false, true] {
+                let seed = 0x4344_4c41;
+                let mut legacy_rng = StdRng::seed_from_u64(seed);
+                let legacy_namespaces =
+                    legacy_to_issuer_namespaces(small_namespaces(), &mut legacy_rng)?;
+                let expected = legacy_digest_namespaces(
+                    &legacy_namespaces,
+                    digest_algorithm,
+                    enable_decoy_digests,
+                    &mut legacy_rng,
+                )?;
+
+                let mut executor_rng = StdRng::seed_from_u64(seed);
+                let executor_namespaces =
+                    to_issuer_namespaces(small_namespaces(), &mut executor_rng)?;
+                let plan = plan_digest_namespaces(
+                    &executor_namespaces,
+                    digest_algorithm,
+                    enable_decoy_digests,
+                    &mut executor_rng,
+                )?;
+                assert_eq!(legacy_rng.gen::<u64>(), executor_rng.gen::<u64>());
+                let mut results = SerialDigestExecutor.execute(&plan.jobs)?;
+                results.reverse();
+                let actual = assemble_digest_namespaces(&plan, results)?;
+
+                assert_eq!(
+                    crate::cbor::to_vec(&legacy_namespaces)?,
+                    crate::cbor::to_vec(&executor_namespaces)?
+                );
+                assert_eq!(expected, actual);
+
+                let legacy_prepared = Mdoc::finish_preparation(
+                    "org.example.credential".to_owned(),
+                    legacy_namespaces,
+                    validity_info.clone(),
+                    digest_algorithm,
+                    device_key_info.clone(),
+                    Algorithm::ES256,
+                    expected,
+                )?;
+                let executor_prepared = Mdoc::finish_preparation(
+                    "org.example.credential".to_owned(),
+                    executor_namespaces,
+                    validity_info.clone(),
+                    digest_algorithm,
+                    device_key_info.clone(),
+                    Algorithm::ES256,
+                    actual,
+                )?;
+
+                assert_eq!(
+                    legacy_prepared.signature_payload(),
+                    executor_prepared.signature_payload()
+                );
+                assert_eq!(
+                    crate::cbor::to_vec(&Tag24::new(&legacy_prepared.mso)?)?,
+                    crate::cbor::to_vec(&Tag24::new(&executor_prepared.mso)?)?
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn digest_jobs_from_all_namespaces_execute_in_one_call() -> anyhow::Result<()> {
+        let Builder {
+            validity_info: Some(validity_info),
+            device_key_info: Some(device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+        let executor = CountingDigestExecutor::default();
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+
+        Mdoc::prepare_with_validated_inputs_rng_and_digest_executor(
+            "org.example.credential".to_owned(),
+            small_namespaces(),
+            validity_info,
+            DigestAlgorithm::SHA256,
+            device_key_info,
+            Algorithm::ES256,
+            false,
+            &mut rng,
+            &executor,
+        )?;
+
+        assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(executor.jobs.load(Ordering::Relaxed), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn decoy_planning_preserves_count_size_and_namespace_boundaries() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+        let issuer_namespaces = to_issuer_namespaces(small_namespaces(), &mut rng)?;
+        let real_counts: BTreeMap<_, _> = issuer_namespaces
+            .iter()
+            .map(|(name, elements)| (name.clone(), elements.len()))
+            .collect();
+        let plan =
+            plan_digest_namespaces(&issuer_namespaces, DigestAlgorithm::SHA256, true, &mut rng)?;
+        let jobs_by_identity: BTreeMap<_, _> = plan
+            .jobs
+            .iter()
+            .map(|job| ((job.credential_id, job.job_id), job))
+            .collect();
+
+        for namespace in &plan.namespaces {
+            let real_count = real_counts[&namespace.name];
+            let decoys = &namespace.digests[real_count..];
+            assert!((5..=9).contains(&decoys.len()));
+            for decoy in decoys {
+                let job = jobs_by_identity[&(decoy.credential_id, decoy.job_id)];
+                assert_eq!(job.input.len(), DECOY_BYTES_LENGTH);
+                assert!(job.ordinal >= real_count);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_randomness_produces_schedule_independent_signature_payload() -> anyhow::Result<()> {
+        let Builder {
+            doc_type: Some(doc_type),
+            namespaces: Some(namespaces),
+            validity_info: Some(validity_info),
+            device_key_info: Some(device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+
+        for digest_algorithm in [
+            DigestAlgorithm::SHA256,
+            DigestAlgorithm::SHA384,
+            DigestAlgorithm::SHA512,
+        ] {
+            for enable_decoy_digests in [false, true] {
+                let seed = 0x4344_4c41;
+                let mut serial_rng = StdRng::seed_from_u64(seed);
+                let serial = Mdoc::prepare_with_validated_inputs_rng_and_digest_executor(
+                    doc_type.clone(),
+                    namespaces.clone(),
+                    validity_info.clone(),
+                    digest_algorithm,
+                    device_key_info.clone(),
+                    Algorithm::ES256,
+                    enable_decoy_digests,
+                    &mut serial_rng,
+                    &SerialDigestExecutor,
+                )?;
+                let serial_mso_bytes = crate::cbor::to_vec(&Tag24::new(&serial.mso)?)?;
+                let serial_namespace_bytes = crate::cbor::to_vec(&serial.namespaces)?;
+
+                for rotation in 0..8 {
+                    let mut reordered_rng = StdRng::seed_from_u64(seed);
+                    let reordered = Mdoc::prepare_with_validated_inputs_rng_and_digest_executor(
+                        doc_type.clone(),
+                        namespaces.clone(),
+                        validity_info.clone(),
+                        digest_algorithm,
+                        device_key_info.clone(),
+                        Algorithm::ES256,
+                        enable_decoy_digests,
+                        &mut reordered_rng,
+                        &RotatingDigestExecutor { rotation },
+                    )?;
+
+                    assert_eq!(serial.signature_payload(), reordered.signature_payload());
+                    assert_eq!(
+                        serial_mso_bytes,
+                        crate::cbor::to_vec(&Tag24::new(&reordered.mso)?)?
+                    );
+                    assert_eq!(
+                        serial_namespace_bytes,
+                        crate::cbor::to_vec(&reordered.namespaces)?
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn fixed_digest_items() -> Vec<IssuerSignedItemBytes> {
         vec![
             Tag24::new(IssuerSignedItem {
@@ -686,6 +1278,36 @@ pub mod test {
             })
             .unwrap(),
         ]
+    }
+
+    fn digest_fixed_items(
+        items: &[IssuerSignedItemBytes],
+        algorithm: DigestAlgorithm,
+        enable_decoy_digests: bool,
+    ) -> anyhow::Result<DigestIds> {
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+        let mut jobs = Vec::new();
+        let mut next_job_id = 0;
+        let digests = plan_digest_namespace(
+            items,
+            algorithm,
+            enable_decoy_digests,
+            &mut rng,
+            &mut next_job_id,
+            &mut jobs,
+        )?;
+        let plan = MdocDigestPlan {
+            namespaces: vec![PlannedMdocNamespace {
+                name: "org.example.fixed".to_owned(),
+                digests,
+            }],
+            jobs,
+        };
+        let mut namespaces =
+            assemble_digest_namespaces(&plan, SerialDigestExecutor.execute(&plan.jobs)?)?;
+        Ok(namespaces
+            .remove("org.example.fixed")
+            .expect("the fixed namespace must be restored"))
     }
 
     #[test]
@@ -715,7 +1337,7 @@ pub mod test {
                 ],
             ),
         ] {
-            let digests = digest_namespace(&items, algorithm, false)?;
+            let digests = digest_fixed_items(&items, algorithm, false)?;
             for (digest_id, expected) in [DigestId::new(7), DigestId::new(42)]
                 .into_iter()
                 .zip(expected)
@@ -735,7 +1357,8 @@ pub mod test {
         let items = fixed_digest_items();
         let item = &items[0];
         let wrapper_bytes = crate::cbor::to_vec(item)?;
-        let digests = digest_namespace(std::slice::from_ref(item), DigestAlgorithm::SHA256, false)?;
+        let digests =
+            digest_fixed_items(std::slice::from_ref(item), DigestAlgorithm::SHA256, false)?;
         let actual = digests.get(&DigestId::new(7)).unwrap().as_ref();
 
         assert_eq!(actual, Sha256::digest(wrapper_bytes).as_slice());
@@ -752,7 +1375,7 @@ pub mod test {
             (DigestAlgorithm::SHA512, 64),
         ] {
             for _ in 0..32 {
-                let digests = digest_namespace(&items, algorithm, true)?;
+                let digests = digest_fixed_items(&items, algorithm, true)?;
                 assert!((items.len() + 5..=items.len() + 9).contains(&digests.len()));
                 assert!(digests
                     .values()
