@@ -234,6 +234,7 @@
 pub mod cbor;
 pub mod cose;
 pub mod definitions;
+pub mod digest_executor;
 pub mod issuance;
 pub mod presentation;
 
