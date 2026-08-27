@@ -68,6 +68,38 @@ impl Mdoc {
         signature_algorithm: Algorithm,
         enable_decoy_digests: bool,
     ) -> Result<PreparedMdoc> {
+        Self::prepare_with_digest_executor(
+            doc_type,
+            namespaces,
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            signature_algorithm,
+            enable_decoy_digests,
+            &SerialDigestExecutor,
+        )
+    }
+
+    /// Prepare an mdoc for remote signing using a caller-selected digest executor.
+    ///
+    /// The executor receives encoded issuer-signed items, which can contain
+    /// sensitive credential claims. It must therefore run within the same
+    /// trusted boundary as the issuer. Signing keys and signer handles are not
+    /// passed to the executor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_digest_executor<E>(
+        doc_type: String,
+        namespaces: Namespaces,
+        validity_info: ValidityInfo,
+        digest_algorithm: DigestAlgorithm,
+        device_key_info: DeviceKeyInfo,
+        signature_algorithm: Algorithm,
+        enable_decoy_digests: bool,
+        digest_executor: &E,
+    ) -> Result<PreparedMdoc>
+    where
+        E: DigestExecutor + ?Sized,
+    {
         if let Some(authorizations) = &device_key_info.key_authorizations {
             authorizations.validate()?;
         }
@@ -84,7 +116,7 @@ impl Mdoc {
             signature_algorithm,
             enable_decoy_digests,
             &mut rng,
-            &SerialDigestExecutor,
+            digest_executor,
         )
     }
 
@@ -310,6 +342,21 @@ impl Builder {
     /// The signature algorithm which the mdoc will be signed with must be known ahead of time as
     /// it is a required field in the signature headers.
     pub fn prepare(self, signature_algorithm: Algorithm) -> Result<PreparedMdoc> {
+        self.prepare_with_digest_executor(signature_algorithm, &SerialDigestExecutor)
+    }
+
+    /// Prepare an mdoc with a caller-selected digest executor.
+    ///
+    /// See [`Mdoc::prepare_with_digest_executor`] for the executor's security
+    /// boundary and contract.
+    pub fn prepare_with_digest_executor<E>(
+        self,
+        signature_algorithm: Algorithm,
+        digest_executor: &E,
+    ) -> Result<PreparedMdoc>
+    where
+        E: DigestExecutor + ?Sized,
+    {
         let doc_type = self
             .doc_type
             .ok_or_else(|| anyhow!("missing parameter: 'doc_type'"))?;
@@ -327,7 +374,7 @@ impl Builder {
             .ok_or_else(|| anyhow!("missing parameter: 'device_key_info'"))?;
         let enable_decoy_digests = self.enable_decoy_digests.unwrap_or(true);
 
-        Mdoc::prepare(
+        Mdoc::prepare_with_digest_executor(
             doc_type,
             namespaces,
             validity_info,
@@ -335,6 +382,7 @@ impl Builder {
             device_key_info,
             signature_algorithm,
             enable_decoy_digests,
+            digest_executor,
         )
     }
 
@@ -942,6 +990,18 @@ pub mod test {
         }
     }
 
+    #[derive(Debug)]
+    struct PanicDigestExecutor;
+
+    impl DigestExecutor for PanicDigestExecutor {
+        fn execute(
+            &self,
+            _jobs: &[DigestJob],
+        ) -> std::result::Result<Vec<DigestResult>, DigestExecutionError> {
+            panic!("validation errors must prevent executor invocation")
+        }
+    }
+
     #[derive(Debug, Default)]
     struct CountingDigestExecutor {
         calls: AtomicUsize,
@@ -1302,6 +1362,145 @@ pub mod test {
         .expect_err("executor failure must not produce a prepared credential");
 
         assert_eq!(error.to_string(), "digest execution failed");
+    }
+
+    #[test]
+    fn public_executor_failure_aborts_mdoc_preparation() {
+        let Builder {
+            doc_type: Some(doc_type),
+            namespaces: Some(namespaces),
+            validity_info: Some(validity_info),
+            digest_algorithm: Some(digest_algorithm),
+            device_key_info: Some(device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+
+        let error = Mdoc::prepare_with_digest_executor(
+            doc_type,
+            namespaces,
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            Algorithm::ES256,
+            false,
+            &FailingDigestExecutor,
+        )
+        .expect_err("executor failure must not produce a prepared credential");
+
+        assert_eq!(error.to_string(), "digest execution failed");
+    }
+
+    #[test]
+    fn public_validation_precedes_executor_execution() {
+        let Builder {
+            validity_info: Some(validity_info),
+            digest_algorithm: Some(digest_algorithm),
+            device_key_info: Some(device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+
+        let empty_namespaces = Mdoc::prepare_with_digest_executor(
+            "org.example.credential".to_owned(),
+            BTreeMap::new(),
+            validity_info.clone(),
+            digest_algorithm,
+            device_key_info.clone(),
+            Algorithm::ES256,
+            false,
+            &PanicDigestExecutor,
+        )
+        .expect_err("empty namespaces must fail before execution");
+        assert_eq!(
+            empty_namespaces.to_string(),
+            "at least one namespace required"
+        );
+
+        let empty_elements = Mdoc::prepare_with_digest_executor(
+            "org.example.credential".to_owned(),
+            [("org.example.empty".to_owned(), BTreeMap::new())]
+                .into_iter()
+                .collect(),
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            Algorithm::ES256,
+            false,
+            &PanicDigestExecutor,
+        )
+        .expect_err("empty namespace elements must fail before execution");
+        assert_eq!(
+            empty_elements.to_string(),
+            "at least one element required in each namespace"
+        );
+    }
+
+    #[test]
+    fn key_authorization_errors_precede_shape_validation_and_execution() {
+        let Builder {
+            validity_info: Some(validity_info),
+            digest_algorithm: Some(digest_algorithm),
+            device_key_info: Some(mut device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+        let namespace = "org.example.first".to_owned();
+        let authorized_elements = NonEmptyMap::try_from(
+            [(
+                namespace.clone(),
+                NonEmptyVec::try_from(vec!["family_name".to_owned()]).unwrap(),
+            )]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        device_key_info.key_authorizations = Some(crate::definitions::KeyAuthorizations {
+            namespaces: Some(NonEmptyVec::try_from(vec![namespace.clone()]).unwrap()),
+            data_elements: Some(authorized_elements),
+        });
+
+        let error = Mdoc::prepare_with_digest_executor(
+            "org.example.credential".to_owned(),
+            BTreeMap::new(),
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            Algorithm::ES256,
+            false,
+            &PanicDigestExecutor,
+        )
+        .expect_err("invalid authorizations must fail before shape validation");
+
+        assert_eq!(
+            error.to_string(),
+            "namespace 'org.example.first' cannot be present in both authorized_namespaces and authorized_data_elements"
+        );
+    }
+
+    #[test]
+    fn builder_uses_the_caller_selected_executor() -> anyhow::Result<()> {
+        let builder = minimal_test_mdoc_builder().enable_decoy_digests(false);
+        let expected_jobs: usize = builder
+            .namespaces
+            .as_ref()
+            .expect("the minimal builder has namespaces")
+            .values()
+            .map(BTreeMap::len)
+            .sum();
+        let executor = CountingDigestExecutor::default();
+
+        builder.prepare_with_digest_executor(Algorithm::ES256, &executor)?;
+
+        assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(executor.jobs.load(Ordering::Relaxed), expected_jobs);
+        Ok(())
     }
 
     #[test]
