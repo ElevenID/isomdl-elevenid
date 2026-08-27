@@ -73,3 +73,7 @@ x509-cert = { version = "0.2.4", features = ["pem", "builder", "hazmat"] }
 [[bench]]
 name = "mdoc_prepare"
 harness = false
+
+[[bench]]
+name = "digest_executor"
+harness = false

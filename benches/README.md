@@ -31,3 +31,12 @@ Criterion reports elapsed time, not total allocated bytes. The 512-item and
 64 KiB portrait cases are included to expose scaling, but peak-live allocation
 must also be measured in the later service/batch harness before enabling a
 parallel executor by default.
+
+`digest_executor` isolates scalar hashing from mdoc planning and assembly. It
+measures 1, 8, 32, 128, and 512 mixed-size inputs for SHA-256/384/512 and reports
+byte throughput. Run it with the same baseline procedure:
+
+```powershell
+cargo bench --bench digest_executor -- --save-baseline main
+cargo bench --bench digest_executor -- --baseline main
+```
