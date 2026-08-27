@@ -575,8 +575,11 @@ where
     } else {
         0
     };
-    let mut used_ids = HashSet::with_capacity(elements.len() + decoy_count);
-    used_ids.extend(elements.iter().map(|item| item.as_ref().digest_id));
+    let mut used_ids = HashSet::new();
+    if decoy_count > 0 {
+        used_ids.reserve(elements.len() + decoy_count);
+        used_ids.extend(elements.iter().map(|item| item.as_ref().digest_id));
+    }
 
     jobs.reserve(elements.len() + decoy_count);
     let mut planned_digests = Vec::with_capacity(elements.len() + decoy_count);
