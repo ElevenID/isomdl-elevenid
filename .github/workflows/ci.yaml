@@ -42,6 +42,7 @@ jobs:
         run: |
           cargo test
           cargo test --all-features
+          cargo test --benches
           cd macros
           cargo test
 
