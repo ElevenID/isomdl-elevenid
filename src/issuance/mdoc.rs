@@ -930,6 +930,18 @@ pub mod test {
         }
     }
 
+    #[derive(Debug)]
+    struct FailingDigestExecutor;
+
+    impl DigestExecutor for FailingDigestExecutor {
+        fn execute(
+            &self,
+            _jobs: &[DigestJob],
+        ) -> std::result::Result<Vec<DigestResult>, DigestExecutionError> {
+            Err(DigestExecutionError)
+        }
+    }
+
     #[derive(Debug, Default)]
     struct CountingDigestExecutor {
         calls: AtomicUsize,
@@ -1258,6 +1270,239 @@ pub mod test {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn executor_failure_aborts_mdoc_preparation() {
+        let Builder {
+            doc_type: Some(doc_type),
+            namespaces: Some(namespaces),
+            validity_info: Some(validity_info),
+            digest_algorithm: Some(digest_algorithm),
+            device_key_info: Some(device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+
+        let error = Mdoc::prepare_with_validated_inputs_rng_and_digest_executor(
+            doc_type,
+            namespaces,
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            Algorithm::ES256,
+            false,
+            &mut rng,
+            &FailingDigestExecutor,
+        )
+        .expect_err("executor failure must not produce a prepared credential");
+
+        assert_eq!(error.to_string(), "digest execution failed");
+    }
+
+    #[test]
+    fn assembly_rejects_invalid_executor_results() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+        let issuer_namespaces = to_issuer_namespaces(small_namespaces(), &mut rng)?;
+        let plan =
+            plan_digest_namespaces(&issuer_namespaces, DigestAlgorithm::SHA256, false, &mut rng)?;
+
+        let mut duplicate = SerialDigestExecutor.execute(&plan.jobs)?;
+        duplicate.push(duplicate[0].clone());
+        assert_eq!(
+            assemble_digest_namespaces(&plan, duplicate)
+                .expect_err("duplicate results must be rejected")
+                .to_string(),
+            "digest executor returned duplicate result identity"
+        );
+
+        let mut missing = SerialDigestExecutor.execute(&plan.jobs)?;
+        missing.pop();
+        assert_eq!(
+            assemble_digest_namespaces(&plan, missing)
+                .expect_err("missing results must be rejected")
+                .to_string(),
+            "digest executor omitted a planned result"
+        );
+
+        let mut unexpected = SerialDigestExecutor.execute(&plan.jobs)?;
+        let mut extra = unexpected[0].clone();
+        extra.job_id = u64::MAX;
+        unexpected.push(extra);
+        assert_eq!(
+            assemble_digest_namespaces(&plan, unexpected)
+                .expect_err("unexpected results must be rejected")
+                .to_string(),
+            "digest executor returned an unexpected result"
+        );
+
+        let mut invalid_length = SerialDigestExecutor.execute(&plan.jobs)?;
+        invalid_length[0].digest.pop();
+        assert_eq!(
+            assemble_digest_namespaces(&plan, invalid_length)
+                .expect_err("invalid digest lengths must be rejected")
+                .to_string(),
+            "digest executor returned an invalid digest length"
+        );
+
+        let mut changed_ordinal = SerialDigestExecutor.execute(&plan.jobs)?;
+        changed_ordinal[0].ordinal = usize::MAX;
+        assert_eq!(
+            assemble_digest_namespaces(&plan, changed_ordinal)
+                .expect_err("changed ordinals must be rejected")
+                .to_string(),
+            "digest executor changed result identity metadata"
+        );
+
+        let mut changed_credential = SerialDigestExecutor.execute(&plan.jobs)?;
+        changed_credential[0].credential_id = u64::MAX;
+        assert_eq!(
+            assemble_digest_namespaces(&plan, changed_credential)
+                .expect_err("changed credential IDs must be rejected")
+                .to_string(),
+            "digest executor omitted a planned result"
+        );
+
+        let mut changed_job = SerialDigestExecutor.execute(&plan.jobs)?;
+        changed_job[0].job_id = u64::MAX;
+        assert_eq!(
+            assemble_digest_namespaces(&plan, changed_job)
+                .expect_err("changed job IDs must be rejected")
+                .to_string(),
+            "digest executor omitted a planned result"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_rejects_invalid_digest_plans() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+        let issuer_namespaces = to_issuer_namespaces(small_namespaces(), &mut rng)?;
+        let plan =
+            plan_digest_namespaces(&issuer_namespaces, DigestAlgorithm::SHA256, false, &mut rng)?;
+
+        let mut duplicate_digest_id_plan = plan.clone();
+        duplicate_digest_id_plan.namespaces[0].digests[1].digest_id =
+            duplicate_digest_id_plan.namespaces[0].digests[0].digest_id;
+        let valid_results = SerialDigestExecutor.execute(&duplicate_digest_id_plan.jobs)?;
+        assert_eq!(
+            assemble_digest_namespaces(&duplicate_digest_id_plan, valid_results)
+                .expect_err("duplicate digest IDs within a namespace must be rejected")
+                .to_string(),
+            "mdoc digest plan contains a duplicate digest ID within a namespace"
+        );
+
+        let mut duplicate_job_identity_plan = plan.clone();
+        duplicate_job_identity_plan.jobs[1].credential_id =
+            duplicate_job_identity_plan.jobs[0].credential_id;
+        duplicate_job_identity_plan.jobs[1].job_id = duplicate_job_identity_plan.jobs[0].job_id;
+        let original_results = SerialDigestExecutor.execute(&plan.jobs)?;
+        assert_eq!(
+            assemble_digest_namespaces(&duplicate_job_identity_plan, original_results)
+                .expect_err("duplicate planned job identities must be rejected")
+                .to_string(),
+            "mdoc digest plan contains duplicate job identity"
+        );
+
+        let mut unknown_job_plan = plan.clone();
+        unknown_job_plan.namespaces[0].digests[0].job_id = u64::MAX;
+        let valid_results = SerialDigestExecutor.execute(&unknown_job_plan.jobs)?;
+        assert_eq!(
+            assemble_digest_namespaces(&unknown_job_plan, valid_results)
+                .expect_err("unknown planned job references must be rejected")
+                .to_string(),
+            "mdoc digest plan references an unknown job"
+        );
+
+        let mut unreferenced_job_plan = plan.clone();
+        unreferenced_job_plan.jobs.push(DigestJob {
+            credential_id: MDOC_CREDENTIAL_ID,
+            job_id: u64::MAX,
+            ordinal: usize::MAX,
+            algorithm: DigestAlgorithm::SHA256,
+            input: b"unreferenced".to_vec(),
+        });
+        let valid_results = SerialDigestExecutor.execute(&unreferenced_job_plan.jobs)?;
+        assert_eq!(
+            assemble_digest_namespaces(&unreferenced_job_plan, valid_results)
+                .expect_err("unreferenced jobs must be rejected")
+                .to_string(),
+            "mdoc digest plan contains an unreferenced job"
+        );
+
+        let mut duplicate_namespace_plan = plan.clone();
+        duplicate_namespace_plan
+            .namespaces
+            .push(PlannedMdocNamespace {
+                name: duplicate_namespace_plan.namespaces[0].name.clone(),
+                digests: Vec::new(),
+            });
+        let valid_results = SerialDigestExecutor.execute(&duplicate_namespace_plan.jobs)?;
+        assert_eq!(
+            assemble_digest_namespaces(&duplicate_namespace_plan, valid_results)
+                .expect_err("duplicate namespaces must be rejected")
+                .to_string(),
+            "mdoc digest plan contains a duplicate namespace"
+        );
+
+        let mut cross_namespace_duplicate_id_plan = plan;
+        cross_namespace_duplicate_id_plan.namespaces[1].digests[0].digest_id =
+            cross_namespace_duplicate_id_plan.namespaces[0].digests[0].digest_id;
+        let valid_results =
+            SerialDigestExecutor.execute(&cross_namespace_duplicate_id_plan.jobs)?;
+        assert!(
+            assemble_digest_namespaces(&cross_namespace_duplicate_id_plan, valid_results).is_ok(),
+            "digest IDs are scoped to their namespaces"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_error_precedence_is_result_order_independent() -> anyhow::Result<()> {
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41);
+        let issuer_namespaces = to_issuer_namespaces(small_namespaces(), &mut rng)?;
+        let plan =
+            plan_digest_namespaces(&issuer_namespaces, DigestAlgorithm::SHA256, false, &mut rng)?;
+
+        for reverse_results in [false, true] {
+            let mut duplicate_and_unexpected = SerialDigestExecutor.execute(&plan.jobs)?;
+            duplicate_and_unexpected.push(duplicate_and_unexpected[0].clone());
+            let mut extra = duplicate_and_unexpected[1].clone();
+            extra.job_id = u64::MAX;
+            duplicate_and_unexpected.push(extra);
+            if reverse_results {
+                duplicate_and_unexpected.reverse();
+            }
+            assert_eq!(
+                assemble_digest_namespaces(&plan, duplicate_and_unexpected)
+                    .expect_err("duplicate identity must have stable precedence")
+                    .to_string(),
+                "digest executor returned duplicate result identity"
+            );
+
+            let mut missing_and_unexpected = SerialDigestExecutor.execute(&plan.jobs)?;
+            let mut extra = missing_and_unexpected
+                .pop()
+                .expect("the plan contains digest jobs");
+            extra.job_id = u64::MAX;
+            missing_and_unexpected.push(extra);
+            if reverse_results {
+                missing_and_unexpected.reverse();
+            }
+            assert_eq!(
+                assemble_digest_namespaces(&plan, missing_and_unexpected)
+                    .expect_err("missing result must have stable precedence")
+                    .to_string(),
+                "digest executor omitted a planned result"
+            );
+        }
+
         Ok(())
     }
 
