@@ -607,9 +607,8 @@ where
     // Generate random digests to avoid leaking the number of real items.
     for decoy_ordinal in 0..decoy_count {
         let digest_id = generate_digest_id(&mut used_ids, rng);
-        let bytes = std::iter::repeat_with(|| rng.gen::<u8>())
-            .take(DECOY_BYTES_LENGTH)
-            .collect();
+        let mut bytes = vec![0; DECOY_BYTES_LENGTH];
+        rng.fill(bytes.as_mut_slice());
         push_planned_digest(
             digest_id,
             elements.len() + decoy_ordinal,
@@ -747,7 +746,7 @@ pub mod test {
     use p256::pkcs8::DecodePrivateKey;
     use p256::SecretKey;
     use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use rand::{RngCore, SeedableRng};
     use sha2::{Digest, Sha256, Sha384, Sha512};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use time::OffsetDateTime;
@@ -763,6 +762,43 @@ pub mod test {
 
     static ISSUER_CERT: &[u8] = include_bytes!("../../test/issuance/issuer-cert.pem");
     static ISSUER_KEY: &str = include_str!("../../test/issuance/issuer-key.pem");
+
+    /// Explicit replay tape whose bulk fill consumes the same sequence as the
+    /// legacy per-byte loop. Production RNGs need only preserve the same byte
+    /// distribution; this test RNG establishes byte-for-byte differential runs.
+    #[derive(Clone, Debug)]
+    struct ReplayRng(StdRng);
+
+    impl SeedableRng for ReplayRng {
+        type Seed = <StdRng as SeedableRng>::Seed;
+
+        fn from_seed(seed: Self::Seed) -> Self {
+            Self(StdRng::from_seed(seed))
+        }
+    }
+
+    impl RngCore for ReplayRng {
+        fn next_u32(&mut self) -> u32 {
+            self.0.next_u32()
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0.next_u64()
+        }
+
+        fn fill_bytes(&mut self, destination: &mut [u8]) {
+            for byte in destination {
+                *byte = self.next_u32() as u8;
+            }
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand::Error> {
+            self.fill_bytes(destination);
+            Ok(())
+        }
+    }
+
+    impl rand::CryptoRng for ReplayRng {}
 
     fn isomdl_data() -> serde_json::Value {
         serde_json::json!(
@@ -1131,6 +1167,24 @@ pub mod test {
     }
 
     #[test]
+    fn complete_buffer_fill_preserves_the_explicit_replay_tape() {
+        let seed = 0x4344_4c41;
+        let mut legacy_rng = ReplayRng::seed_from_u64(seed);
+        let legacy: Vec<u8> = std::iter::repeat_with(|| legacy_rng.gen::<u8>())
+            .take(DECOY_BYTES_LENGTH)
+            .collect();
+        let legacy_tail = legacy_rng.gen::<u64>();
+
+        let mut fill_rng = ReplayRng::seed_from_u64(seed);
+        let mut filled = vec![0; DECOY_BYTES_LENGTH];
+        fill_rng.fill(filled.as_mut_slice());
+        let fill_tail = fill_rng.gen::<u64>();
+
+        assert_eq!(legacy, filled);
+        assert_eq!(legacy_tail, fill_tail);
+    }
+
+    #[test]
     fn serial_executor_matches_legacy_planning_for_fixed_randomness() -> anyhow::Result<()> {
         let Builder {
             validity_info: Some(validity_info),
@@ -1148,7 +1202,7 @@ pub mod test {
         ] {
             for enable_decoy_digests in [false, true] {
                 let seed = 0x4344_4c41;
-                let mut legacy_rng = StdRng::seed_from_u64(seed);
+                let mut legacy_rng = ReplayRng::seed_from_u64(seed);
                 let legacy_namespaces =
                     legacy_to_issuer_namespaces(small_namespaces(), &mut legacy_rng)?;
                 let expected = legacy_digest_namespaces(
@@ -1158,7 +1212,7 @@ pub mod test {
                     &mut legacy_rng,
                 )?;
 
-                let mut executor_rng = StdRng::seed_from_u64(seed);
+                let mut executor_rng = ReplayRng::seed_from_u64(seed);
                 let executor_namespaces =
                     to_issuer_namespaces(small_namespaces(), &mut executor_rng)?;
                 let plan = plan_digest_namespaces(
