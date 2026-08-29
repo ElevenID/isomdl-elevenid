@@ -426,6 +426,10 @@ fn execute_digest_job(job: &DigestJob) -> DigestResult {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "parallel")]
+    use rand::seq::SliceRandom;
+    #[cfg(feature = "parallel")]
+    use rand::{rngs::StdRng, SeedableRng};
     #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     use std::{
         sync::{Arc, Barrier},
@@ -560,6 +564,25 @@ mod tests {
                 assert_eq!(parallel, serial);
                 assert_eq!(jobs, original_jobs, "executor mutated its input jobs");
             }
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn native_executor_is_independent_of_repeated_shuffled_schedules() {
+        let mut jobs = mixed_digest_jobs(128);
+        let expected = sorted_results(SerialDigestExecutor.execute(&jobs).unwrap());
+        let mut rng = StdRng::seed_from_u64(0x4344_4c41_5343_4845);
+
+        for round in 0..64 {
+            jobs.shuffle(&mut rng);
+            let workers = 2 + round % (MAX_PARALLEL_DIGEST_WORKERS - 1);
+            let executor = NativeParallelDigestExecutor::new(NonZeroUsize::new(workers).unwrap());
+            assert_eq!(
+                sorted_results(executor.execute(&jobs).unwrap()),
+                expected,
+                "digest results changed in schedule round {round}"
+            );
         }
     }
 
