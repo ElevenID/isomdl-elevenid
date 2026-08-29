@@ -23,6 +23,10 @@ ElevenID keeps local changes small and reviewable:
    scalar executor. Issuance allocates randomness before executor dispatch and
    restores results by stable, per-call identity; scalar execution remains the
    default and signing is unchanged.
+5. Offer an opt-in `parallel` digest executor that uses a reusable native
+   worker pool, a fixed process-wide worker budget, and serial fallback on
+   contention or WebAssembly. Public preparation remains serial unless a
+   caller explicitly selects the executor inside the issuer trust boundary.
 
 The third correction is covered by an ElevenID-owned regression harness using
 the observed OIDF Multipaz interoperability vector. The harness is not
@@ -36,8 +40,24 @@ signature-payload bytes. Malformed and incomplete executor results fail before
 a prepared credential is returned. Executor inputs can contain sensitive
 claims and therefore remain inside the issuer's trusted process; signing keys
 and signer handles never cross the executor boundary. Criterion fixtures track
-end-to-end preparation and scalar digest throughput without logging per-item
-metadata.
+end-to-end preparation plus scalar and opt-in native digest throughput without
+logging per-item metadata.
+
+The fifth change adds an execution candidate, not default routing or a general
+mdoc speedup claim. The reusable pool owns at most eight native threads across
+the process, and a permit budget bounds work admitted to those threads.
+Contending calls run through the exact scalar oracle on their caller threads
+without waiting, so the pool bound is not a hard cap on total concurrent
+caller-thread computation. Initialization failure aborts the current call with
+the redacted digest-execution error but can be retried by a later call. Under
+an unwind panic profile, a worker panic discards sibling outputs and surfaces
+the same error; abort profiles retain their process-abort semantics.
+Differential tests cover SHA-256/384/512, SHA block boundaries, repeated
+shuffled schedules, overlapping identities in concurrent calls, actual pool
+admission and contention fallback, post-panic reuse, decoys, fixed-random MSO
+bytes, namespaces, and signature payloads. The benchmark reuses the pool while
+retaining dispatch and synchronization costs. Stage and batch measurements
+remain required before any adaptive or default activation.
 
 ## Upstream maintenance
 
