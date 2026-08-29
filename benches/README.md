@@ -5,8 +5,8 @@ covers 1, 8, 32, 128, and 512 items; decoys off/on; SHA-256/384/512; and small,
 medium, 64 KiB portrait, and mixed payloads. Fixture cloning is outside the
 timed region, and benchmark identifiers contain only aggregate fixture labels.
 
-Hosted CI runs `cargo test --benches` as a compile and smoke gate. Do not use
-wall-clock thresholds on shared CI runners.
+Hosted CI runs `cargo test --benches --all-features` as a compile and smoke
+gate. Do not use wall-clock thresholds on shared CI runners.
 
 For a pull request comparison, use the same idle machine. Keep Cargo build
 targets separate so equal package names and versions cannot reuse another
@@ -58,8 +58,9 @@ CARGO_TARGET_DIR=/tmp/isomdl-cdla-feature-target \
 git worktree remove --force "$baseline_worktree"
 ```
 
-Record the median, 95% confidence interval, and credentials per second in the
-pull request. Treat a result as a regression when the entire 95% change
+Record the median, 95% confidence interval, and relevant throughput in the pull
+request: credentials per second for mdoc and bytes per second for the digest
+executor. Treat a result as a regression when the entire 95% change
 interval is more than 5% slower, then repeat once before accepting or repairing
 it. Do not commit machine-specific Criterion output or claim a speedup when a
 reverse-order repeat contradicts the first run.
@@ -72,40 +73,48 @@ portrait cases expose scaling, while those stage and allocation metrics must be
 captured by the later service/batch harness before enabling a parallel executor
 by default.
 
-`digest_executor` isolates scalar hashing from mdoc planning and assembly. It
-measures 1, 8, 32, 128, and 512 mixed-size inputs for SHA-256/384/512 and reports
-byte throughput. Its introduction establishes the scalar baseline; it cannot
-be compared to a revision without the executor API. For a later optimized
-executor, check out the commit that introduced this benchmark as the baseline
-and again isolate Cargo build targets:
+`digest_executor` isolates hashing from mdoc planning and assembly. It measures
+1, 8, 32, 128, and 512 mixed-size inputs for SHA-256/384/512 and reports byte
+throughput. Default builds contain only the scalar oracle. With the `parallel`
+feature, the same process also measures the opt-in native executor with a
+requested bound of up to four workers. The benchmark prints the host-derived
+bound; a one-job cell deliberately takes the scalar branch, and a constrained
+host can use fewer workers or only the scalar fallback. The process-wide pool
+is initialized during benchmark preflight and reused across samples, so measured
+work includes dispatch and synchronization without repeatedly measuring thread
+creation. Every fixture is checked against the scalar oracle before timing.
+
+Run the complete matrix once, then repeat in reverse implementation order by
+using Criterion's filters:
 
 ```powershell
-$digestBaselineWorktree = "C:\tmp\isomdl-digest-baseline"
-$digestBaselineCommit = git log --diff-filter=A --format="%H" -- benches/digest_executor.rs |
-    Select-Object -First 1
-git worktree add --detach $digestBaselineWorktree $digestBaselineCommit
-
-$env:CRITERION_HOME = "C:\tmp\isomdl-digest-criterion"
-$env:CARGO_TARGET_DIR = "C:\tmp\isomdl-digest-baseline-target"
-cargo bench --manifest-path "$digestBaselineWorktree\Cargo.toml" --bench digest_executor -- --save-baseline scalar --verbose
-
-$env:CARGO_TARGET_DIR = "C:\tmp\isomdl-digest-feature-target"
-cargo bench --bench digest_executor -- --baseline scalar --verbose
-
-git worktree remove --force $digestBaselineWorktree
+$env:CRITERION_HOME = "C:\tmp\isomdl-cdla-digest-order-run-1"
+cargo bench --features parallel --bench digest_executor -- --save-baseline forward --noplot
+cargo bench --features parallel --bench digest_executor -- --baseline forward --noplot native-up-to-4-workers
+cargo bench --features parallel --bench digest_executor -- --baseline forward --noplot scalar
 ```
 
 ```sh
-digest_baseline_worktree=/tmp/isomdl-digest-baseline
-digest_baseline_commit=$(git log --diff-filter=A --format=%H -- benches/digest_executor.rs | head -n 1)
-git worktree add --detach "$digest_baseline_worktree" "$digest_baseline_commit"
-
-export CRITERION_HOME=/tmp/isomdl-digest-criterion
-CARGO_TARGET_DIR=/tmp/isomdl-digest-baseline-target \
-  cargo bench --manifest-path "$digest_baseline_worktree/Cargo.toml" \
-  --bench digest_executor -- --save-baseline scalar --verbose
-CARGO_TARGET_DIR=/tmp/isomdl-digest-feature-target \
-  cargo bench --bench digest_executor -- --baseline scalar --verbose
-
-git worktree remove --force "$digest_baseline_worktree"
+export CRITERION_HOME=/tmp/isomdl-cdla-digest-order-run-1
+cargo bench --features parallel --bench digest_executor -- --save-baseline forward --noplot
+cargo bench --features parallel --bench digest_executor -- --baseline forward --noplot native-up-to-4-workers
+cargo bench --features parallel --bench digest_executor -- --baseline forward --noplot scalar
 ```
+
+Choose an empty `CRITERION_HOME` for every two-pass experiment. The named
+`forward` baseline preserves the complete first pass while the two filtered
+runs write the reverse-order samples without replacing it.
+
+The scalar and native implementations have different Criterion IDs. A printed
+`change` interval therefore compares that ID with its own previous run, not
+native execution with the scalar group. Compare the corresponding
+`median.point_estimate` values and 95% confidence intervals from each ID's
+`estimates.json`; do not describe Criterion's slope estimate as a median. A
+revision baseline is valid only for like-for-like IDs present in both
+revisions. Treat an apparent crossover as workload-specific and unqualified if
+the confidence intervals overlap or the reverse-order repeat contradicts it.
+
+The native executor remains caller-selected and is not the `Mdoc::prepare`
+default. These isolated digest numbers do not establish an end-to-end
+credential speedup or justify adaptive routing. Record regressions as well as
+improvements, and retain the scalar result as the behavioral oracle.
