@@ -1557,6 +1557,70 @@ pub mod test {
         Ok(())
     }
 
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn native_executor_preserves_fixed_randomness_mdoc_bytes() -> anyhow::Result<()> {
+        let Builder {
+            doc_type: Some(doc_type),
+            namespaces: Some(namespaces),
+            validity_info: Some(validity_info),
+            device_key_info: Some(device_key_info),
+            ..
+        } = minimal_test_mdoc_builder()
+        else {
+            unreachable!("the minimal mdoc builder has every required input")
+        };
+        let executor = crate::digest_executor::NativeParallelDigestExecutor::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+        );
+
+        for digest_algorithm in [
+            DigestAlgorithm::SHA256,
+            DigestAlgorithm::SHA384,
+            DigestAlgorithm::SHA512,
+        ] {
+            for enable_decoy_digests in [false, true] {
+                let seed = 0x4344_4c41;
+                let mut serial_rng = StdRng::seed_from_u64(seed);
+                let serial = Mdoc::prepare_with_validated_inputs_rng_and_digest_executor(
+                    doc_type.clone(),
+                    namespaces.clone(),
+                    validity_info.clone(),
+                    digest_algorithm,
+                    device_key_info.clone(),
+                    Algorithm::ES256,
+                    enable_decoy_digests,
+                    &mut serial_rng,
+                    &SerialDigestExecutor,
+                )?;
+
+                let mut parallel_rng = StdRng::seed_from_u64(seed);
+                let parallel = Mdoc::prepare_with_validated_inputs_rng_and_digest_executor(
+                    doc_type.clone(),
+                    namespaces.clone(),
+                    validity_info.clone(),
+                    digest_algorithm,
+                    device_key_info.clone(),
+                    Algorithm::ES256,
+                    enable_decoy_digests,
+                    &mut parallel_rng,
+                    &executor,
+                )?;
+
+                assert_eq!(serial.signature_payload(), parallel.signature_payload());
+                assert_eq!(
+                    crate::cbor::to_vec(&Tag24::new(&serial.mso)?)?,
+                    crate::cbor::to_vec(&Tag24::new(&parallel.mso)?)?
+                );
+                assert_eq!(
+                    crate::cbor::to_vec(&serial.namespaces)?,
+                    crate::cbor::to_vec(&parallel.namespaces)?
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn executor_failure_aborts_mdoc_preparation() {
         let Builder {

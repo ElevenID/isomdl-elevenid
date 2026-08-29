@@ -27,6 +27,7 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
@@ -42,9 +43,12 @@ jobs:
         run: |
           cargo test
           cargo test --all-features
-          cargo test --benches
+          cargo test --benches --all-features
           cd macros
           cargo test
+
+      - name: Check WebAssembly fallback
+        run: cargo check --target wasm32-unknown-unknown --all-features --lib
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features --no-deps
