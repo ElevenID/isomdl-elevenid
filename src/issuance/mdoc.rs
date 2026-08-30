@@ -2439,9 +2439,11 @@ pub mod test {
         Ok(())
     }
 
-    #[cfg(feature = "parallel")]
-    #[test]
-    fn native_executor_preserves_fixed_randomness_mdoc_bytes() -> anyhow::Result<()> {
+    #[cfg(any(feature = "parallel", feature = "simd"))]
+    fn assert_executor_preserves_fixed_randomness_mdoc_bytes<E>(executor: &E) -> anyhow::Result<()>
+    where
+        E: DigestExecutor,
+    {
         let Builder {
             doc_type: Some(doc_type),
             namespaces: Some(namespaces),
@@ -2452,9 +2454,6 @@ pub mod test {
         else {
             unreachable!("the minimal mdoc builder has every required input")
         };
-        let executor = crate::digest_executor::NativeParallelDigestExecutor::new(
-            std::num::NonZeroUsize::new(4).unwrap(),
-        );
 
         for digest_algorithm in [
             DigestAlgorithm::SHA256,
@@ -2486,7 +2485,7 @@ pub mod test {
                     Algorithm::ES256,
                     enable_decoy_digests,
                     &mut parallel_rng,
-                    &executor,
+                    executor,
                 )?;
 
                 assert_eq!(serial.signature_payload(), parallel.signature_payload());
@@ -2501,6 +2500,23 @@ pub mod test {
             }
         }
         Ok(())
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn native_executor_preserves_fixed_randomness_mdoc_bytes() -> anyhow::Result<()> {
+        let executor = crate::digest_executor::NativeParallelDigestExecutor::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+        );
+        assert_executor_preserves_fixed_randomness_mdoc_bytes(&executor)
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_executor_preserves_fixed_randomness_mdoc_bytes() -> anyhow::Result<()> {
+        assert_executor_preserves_fixed_randomness_mdoc_bytes(
+            &crate::digest_executor::SimdDigestExecutor,
+        )
     }
 
     #[test]

@@ -237,6 +237,8 @@ pub mod definitions;
 pub mod digest_executor;
 pub mod issuance;
 pub mod presentation;
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod simd_sha256;
 
 pub mod macros {
     pub use isomdl_macros::{FromJson, ToCbor};

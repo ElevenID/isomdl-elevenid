@@ -12,6 +12,7 @@ exclude = ["test/"]
 
 [features]
 parallel = ["dep:rayon"]
+simd = ["dep:wide"]
 
 [package.metadata.cargo-machete]
 # Attribute and proc-macro references are not visible to cargo-machete.
@@ -66,6 +67,9 @@ sha1 = "0.10.6"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rayon = { version = "1.12", optional = true }
+
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+wide = { version = "=0.7.33", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false }
