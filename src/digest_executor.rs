@@ -5,6 +5,8 @@
 //! keys or signer handles. Callers must restore results by identity rather than
 //! relying on the order in which results are returned.
 
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+use std::collections::BTreeMap;
 use std::fmt;
 #[cfg(feature = "parallel")]
 use std::num::NonZeroUsize;
@@ -97,6 +99,93 @@ impl DigestExecutor for SerialDigestExecutor {
     fn execute(&self, jobs: &[DigestJob]) -> Result<Vec<DigestResult>, DigestExecutionError> {
         Ok(jobs.iter().map(execute_digest_job).collect())
     }
+}
+
+/// Opt-in safe-SIMD executor for compatible SHA-256 digest groups.
+///
+/// On x86-64 and AArch64, complete groups of eight SHA-256 jobs with the same
+/// padded block count use the owned SIMD lane implementation. Group remainders,
+/// SHA-384, and SHA-512 use the exact scalar oracle. Unsupported targets,
+/// including WebAssembly, use the scalar oracle for the complete call.
+///
+/// The default credential preparation APIs do not select this executor. A
+/// caller must opt in through `prepare_with_digest_executor` after measuring
+/// its own target and workload.
+#[cfg(feature = "simd")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SimdDigestExecutor;
+
+#[cfg(feature = "simd")]
+impl SimdDigestExecutor {
+    /// Number of SHA-256 jobs in one SIMD group on a supported target.
+    ///
+    /// A value of one reports that this build uses only the scalar fallback.
+    #[must_use]
+    pub const fn sha256_lane_width() -> usize {
+        if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+            8
+        } else {
+            1
+        }
+    }
+}
+
+#[cfg(feature = "simd")]
+impl DigestExecutor for SimdDigestExecutor {
+    fn execute(&self, jobs: &[DigestJob]) -> Result<Vec<DigestResult>, DigestExecutionError> {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            execute_simd_digest_jobs(jobs)
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            SerialDigestExecutor.execute(jobs)
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn execute_simd_digest_jobs(jobs: &[DigestJob]) -> Result<Vec<DigestResult>, DigestExecutionError> {
+    let mut results = vec![None; jobs.len()];
+    let mut sha256_groups = BTreeMap::<usize, Vec<usize>>::new();
+
+    for (index, job) in jobs.iter().enumerate() {
+        if job.algorithm == DigestAlgorithm::SHA256 {
+            sha256_groups
+                .entry(crate::simd_sha256::sha256_block_count(job.input.len()))
+                .or_default()
+                .push(index);
+        } else {
+            results[index] = Some(execute_digest_job(job));
+        }
+    }
+
+    for indices in sha256_groups.values() {
+        let simd_job_count = indices.len() / crate::simd_sha256::LANES * crate::simd_sha256::LANES;
+        if simd_job_count != 0 {
+            let inputs: Vec<&[u8]> = indices[..simd_job_count]
+                .iter()
+                .map(|&index| jobs[index].input.as_slice())
+                .collect();
+            let mut digests = vec![[0_u8; 32]; simd_job_count];
+            if !crate::simd_sha256::hash_many_same_block_count(&inputs, &mut digests) {
+                return Err(DigestExecutionError);
+            }
+            for (&index, digest) in indices[..simd_job_count].iter().zip(digests) {
+                results[index] = Some(digest_result(&jobs[index], digest.to_vec()));
+            }
+        }
+
+        for &index in &indices[simd_job_count..] {
+            results[index] = Some(execute_digest_job(&jobs[index]));
+        }
+    }
+
+    results
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or(DigestExecutionError)
 }
 
 /// Maximum process-wide native pool size and per-call requested worker bound.
@@ -412,7 +501,10 @@ fn digest(algorithm: DigestAlgorithm, input: &[u8]) -> Vec<u8> {
 }
 
 fn execute_digest_job(job: &DigestJob) -> DigestResult {
-    let digest = digest(job.algorithm, &job.input);
+    digest_result(job, digest(job.algorithm, &job.input))
+}
+
+fn digest_result(job: &DigestJob, digest: Vec<u8>) -> DigestResult {
     debug_assert_eq!(digest.len(), digest_length(job.algorithm));
     DigestResult {
         credential_id: job.credential_id,
@@ -520,7 +612,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "parallel")]
+    #[cfg(any(feature = "parallel", feature = "simd"))]
     fn mixed_digest_jobs(job_count: usize) -> Vec<DigestJob> {
         const INPUT_LENGTHS: [usize; 15] = [
             0, 1, 55, 56, 63, 64, 65, 111, 112, 127, 128, 129, 255, 1_024, 4_096,
@@ -546,6 +638,73 @@ mod tests {
     fn sorted_results(mut results: Vec<DigestResult>) -> Vec<DigestResult> {
         results.sort_by_key(|result| (result.credential_id, result.job_id, result.ordinal));
         results
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_executor_matches_scalar_for_mixed_algorithms_and_block_boundaries() {
+        for job_count in [0, 1, 2, 7, 8, 9, 31, 32, 33, 128, 512] {
+            let mut jobs = mixed_digest_jobs(job_count);
+            // Guarantee several full SHA-256 groups while retaining varied
+            // lengths within one padded-block class.
+            jobs.extend((0..24).map(|offset| DigestJob {
+                credential_id: 91 + (offset % 3) as u64,
+                job_id: 20_000 + offset as u64,
+                ordinal: job_count + 24 - offset,
+                algorithm: DigestAlgorithm::SHA256,
+                input: vec![offset as u8; 256 + offset],
+            }));
+            let original_jobs = jobs.clone();
+
+            let expected = SerialDigestExecutor.execute(&jobs).unwrap();
+            let actual = SimdDigestExecutor.execute(&jobs).unwrap();
+
+            assert_eq!(actual, expected);
+            assert_eq!(jobs, original_jobs, "executor mutated its input jobs");
+        }
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_executor_preserves_caller_order_and_uses_scalar_fallbacks() {
+        let mut jobs = Vec::new();
+        for ordinal in 0..9 {
+            jobs.push(DigestJob {
+                credential_id: 3,
+                job_id: 100 - ordinal as u64,
+                ordinal,
+                algorithm: DigestAlgorithm::SHA256,
+                input: vec![ordinal as u8; 64 + ordinal],
+            });
+        }
+        jobs.push(DigestJob {
+            credential_id: 2,
+            job_id: 7,
+            ordinal: 99,
+            algorithm: DigestAlgorithm::SHA384,
+            input: b"sha-384 stays scalar".to_vec(),
+        });
+        jobs.push(DigestJob {
+            credential_id: 1,
+            job_id: 8,
+            ordinal: 98,
+            algorithm: DigestAlgorithm::SHA512,
+            input: b"sha-512 stays scalar".to_vec(),
+        });
+
+        assert_eq!(
+            SimdDigestExecutor.execute(&jobs).unwrap(),
+            SerialDigestExecutor.execute(&jobs).unwrap()
+        );
+        assert_eq!(format!("{SimdDigestExecutor:?}"), "SimdDigestExecutor");
+        assert_eq!(
+            SimdDigestExecutor::sha256_lane_width(),
+            if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+                8
+            } else {
+                1
+            }
+        );
     }
 
     #[cfg(feature = "parallel")]
