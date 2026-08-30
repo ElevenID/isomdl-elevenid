@@ -1,3 +1,5 @@
+#[cfg(feature = "simd")]
+use std::collections::BTreeMap;
 use std::hint::black_box;
 #[cfg(feature = "parallel")]
 use std::num::NonZeroUsize;
@@ -7,16 +9,31 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use isomdl::definitions::DigestAlgorithm;
 #[cfg(feature = "parallel")]
 use isomdl::digest_executor::NativeParallelDigestExecutor;
+#[cfg(feature = "simd")]
+use isomdl::digest_executor::SimdDigestExecutor;
 use isomdl::digest_executor::{DigestExecutor, DigestJob, DigestResult, SerialDigestExecutor};
 
 const JOB_COUNTS: [usize; 5] = [1, 8, 32, 128, 512];
 
-fn digest_jobs(job_count: usize, algorithm: DigestAlgorithm) -> Vec<DigestJob> {
+#[derive(Clone, Copy)]
+enum InputProfile {
+    Mixed,
+    Uniform256,
+}
+
+fn digest_jobs(
+    job_count: usize,
+    algorithm: DigestAlgorithm,
+    profile: InputProfile,
+) -> Vec<DigestJob> {
     const INPUT_LENGTHS: [usize; 5] = [16, 64, 256, 1024, 4096];
 
     (0..job_count)
         .map(|ordinal| {
-            let input_length = INPUT_LENGTHS[ordinal % INPUT_LENGTHS.len()];
+            let input_length = match profile {
+                InputProfile::Mixed => INPUT_LENGTHS[ordinal % INPUT_LENGTHS.len()],
+                InputProfile::Uniform256 => 256,
+            };
             DigestJob {
                 credential_id: 0,
                 job_id: ordinal as u64,
@@ -55,13 +72,18 @@ where
     E: DigestExecutor,
 {
     let mut group = criterion.benchmark_group(group_name);
-    for (name, algorithm) in [
-        ("sha256", DigestAlgorithm::SHA256),
-        ("sha384", DigestAlgorithm::SHA384),
-        ("sha512", DigestAlgorithm::SHA512),
+    for (name, algorithm, profile) in [
+        ("sha256", DigestAlgorithm::SHA256, InputProfile::Mixed),
+        (
+            "sha256-uniform-256",
+            DigestAlgorithm::SHA256,
+            InputProfile::Uniform256,
+        ),
+        ("sha384", DigestAlgorithm::SHA384, InputProfile::Mixed),
+        ("sha512", DigestAlgorithm::SHA512, InputProfile::Mixed),
     ] {
         for job_count in JOB_COUNTS {
-            let jobs = digest_jobs(job_count, algorithm);
+            let jobs = digest_jobs(job_count, algorithm, profile);
             assert_serial_equivalence(executor, &jobs);
             let total_bytes = jobs.iter().map(|job| job.input.len() as u64).sum();
             group.throughput(Throughput::Bytes(total_bytes));
@@ -77,6 +99,43 @@ where
         }
     }
     group.finish();
+}
+
+#[cfg(feature = "simd")]
+fn report_simd_coverage() {
+    let lane_width = SimdDigestExecutor::sha256_lane_width();
+    eprintln!("digest executor benchmark: SIMD SHA-256 logical lane width is {lane_width}");
+    if lane_width == 1 {
+        eprintln!("digest executor benchmark: this target uses the complete scalar fallback");
+        return;
+    }
+
+    for (profile_name, profile) in [
+        ("sha256", InputProfile::Mixed),
+        ("sha256-uniform-256", InputProfile::Uniform256),
+    ] {
+        for job_count in JOB_COUNTS {
+            let jobs = digest_jobs(job_count, DigestAlgorithm::SHA256, profile);
+            let mut jobs_by_block_count = BTreeMap::<usize, usize>::new();
+            for job in &jobs {
+                let input_len = job.input.len();
+                let block_count = input_len / 64 + usize::from(input_len % 64 >= 56) + 1;
+                *jobs_by_block_count.entry(block_count).or_default() += 1;
+            }
+            let simd_jobs: usize = jobs_by_block_count
+                .values()
+                .map(|count| count / lane_width * lane_width)
+                .sum();
+            let simd_groups = simd_jobs / lane_width;
+            let coverage = simd_jobs as f64 / job_count as f64 * 100.0;
+            let lane_utilization = if simd_groups == 0 { "n/a" } else { "100%" };
+            eprintln!(
+                "digest executor benchmark: profile={profile_name} jobs={job_count} \
+                 simd_groups={simd_groups} simd_job_coverage={coverage:.1}% \
+                 dispatched_lane_utilization={lane_utilization}"
+            );
+        }
+    }
 }
 
 fn benchmark_digest_executor(criterion: &mut Criterion) {
@@ -97,6 +156,12 @@ fn benchmark_digest_executor(criterion: &mut Criterion) {
             "digest_executor/native-up-to-4-workers",
             &NativeParallelDigestExecutor::new(requested_workers),
         );
+    }
+
+    #[cfg(feature = "simd")]
+    {
+        report_simd_coverage();
+        benchmark_executor(criterion, "digest_executor/simd", &SimdDigestExecutor);
     }
 }
 
