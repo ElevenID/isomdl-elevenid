@@ -509,6 +509,7 @@ const DECOY_BYTES_LENGTH: usize = 512;
 
 #[derive(Clone, Eq, PartialEq)]
 struct MdocDigestPlan {
+    credential_id: u64,
     namespaces: Vec<PlannedMdocNamespace>,
     jobs: Vec<DigestJob>,
 }
@@ -535,8 +536,28 @@ fn plan_digest_namespaces<R>(
 where
     R: Rng + ?Sized,
 {
+    plan_digest_namespaces_for_credential(
+        MDOC_CREDENTIAL_ID,
+        namespaces,
+        digest_algorithm,
+        enable_decoy_digests,
+        rng,
+    )
+}
+
+fn plan_digest_namespaces_for_credential<R>(
+    credential_id: u64,
+    namespaces: &IssuerNamespaces,
+    digest_algorithm: DigestAlgorithm,
+    enable_decoy_digests: bool,
+    rng: &mut R,
+) -> Result<MdocDigestPlan>
+where
+    R: Rng + ?Sized,
+{
     let item_count = namespaces.values().map(|elements| elements.len()).sum();
     let mut plan = MdocDigestPlan {
+        credential_id,
         namespaces: Vec::with_capacity(namespaces.len()),
         jobs: Vec::with_capacity(item_count),
     };
@@ -546,6 +567,7 @@ where
         plan.namespaces.push(PlannedMdocNamespace {
             name: name.clone(),
             digests: plan_digest_namespace(
+                credential_id,
                 elements,
                 digest_algorithm,
                 enable_decoy_digests,
@@ -560,6 +582,7 @@ where
 }
 
 fn plan_digest_namespace<R>(
+    credential_id: u64,
     elements: &[IssuerSignedItemBytes],
     digest_algorithm: DigestAlgorithm,
     enable_decoy_digests: bool,
@@ -586,6 +609,7 @@ where
 
     for (ordinal, item) in elements.iter().enumerate() {
         push_planned_digest(
+            credential_id,
             item.as_ref().digest_id,
             ordinal,
             digest_algorithm,
@@ -602,6 +626,7 @@ where
         let mut bytes = vec![0; DECOY_BYTES_LENGTH];
         rng.fill(bytes.as_mut_slice());
         push_planned_digest(
+            credential_id,
             digest_id,
             elements.len() + decoy_ordinal,
             digest_algorithm,
@@ -617,6 +642,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn push_planned_digest(
+    credential_id: u64,
     digest_id: DigestId,
     ordinal: usize,
     algorithm: DigestAlgorithm,
@@ -631,14 +657,14 @@ fn push_planned_digest(
         .ok_or_else(|| anyhow!("too many mdoc digest jobs"))?;
 
     jobs.push(DigestJob {
-        credential_id: MDOC_CREDENTIAL_ID,
+        credential_id,
         job_id,
         ordinal,
         algorithm,
         input,
     });
     planned_digests.push(PlannedMdocDigest {
-        credential_id: MDOC_CREDENTIAL_ID,
+        credential_id,
         job_id,
         digest_id,
     });
@@ -682,8 +708,18 @@ fn assemble_ordered_digest_namespaces(
             let result = results
                 .next()
                 .ok_or_else(|| anyhow!("digest executor omitted a planned result"))?;
-            if (job.credential_id, job.job_id) != (MDOC_CREDENTIAL_ID, expected_job_id) {
+            if job.credential_id != plan.credential_id {
+                return Err(anyhow!(
+                    "mdoc digest plan contains inconsistent credential identity"
+                ));
+            }
+            if job.job_id != expected_job_id {
                 return Err(anyhow!("mdoc digest plan contains duplicate job identity"));
+            }
+            if planned_digest.credential_id != plan.credential_id {
+                return Err(anyhow!(
+                    "mdoc digest plan contains inconsistent credential identity"
+                ));
             }
             if (planned_digest.credential_id, planned_digest.job_id)
                 != (job.credential_id, job.job_id)
@@ -732,6 +768,20 @@ fn assemble_reordered_digest_namespaces(
     plan: &MdocDigestPlan,
     results: Vec<DigestResult>,
 ) -> Result<BTreeMap<String, DigestIds>> {
+    let mut batches = assemble_reordered_digest_batches(std::slice::from_ref(plan), results)?;
+    batches
+        .pop()
+        .ok_or_else(|| anyhow!("mdoc digest batch omitted a planned credential"))
+}
+
+fn assemble_reordered_digest_batches(
+    plans: &[MdocDigestPlan],
+    results: Vec<DigestResult>,
+) -> Result<Vec<BTreeMap<String, DigestIds>>> {
+    // This restores the identity metadata promised by the trusted
+    // `DigestExecutor` contract; the pair is not a cryptographic binding
+    // between a digest and its source job. Re-hashing here would duplicate the
+    // executor work and is deliberately outside this assembly boundary.
     let mut results_by_identity = BTreeMap::new();
     let mut duplicate_result = false;
     for result in results {
@@ -746,58 +796,79 @@ fn assemble_reordered_digest_namespaces(
         ));
     }
 
-    let mut digests_by_identity = BTreeMap::new();
-    let mut expected_identities = HashSet::with_capacity(plan.jobs.len());
-    for job in &plan.jobs {
-        let identity = (job.credential_id, job.job_id);
-        if !expected_identities.insert(identity) {
-            return Err(anyhow!("mdoc digest plan contains duplicate job identity"));
+    let mut credential_ids = HashSet::with_capacity(plans.len());
+    let mut batches = Vec::with_capacity(plans.len());
+    for plan in plans {
+        if !credential_ids.insert(plan.credential_id) {
+            return Err(anyhow!(
+                "mdoc digest batch contains duplicate credential identity"
+            ));
         }
 
-        let result = results_by_identity
-            .remove(&identity)
-            .ok_or_else(|| anyhow!("digest executor omitted a planned result"))?;
-        if result.ordinal != job.ordinal {
-            return Err(anyhow!("digest executor changed result identity metadata"));
+        let mut digests_by_identity = BTreeMap::new();
+        let mut expected_identities = HashSet::with_capacity(plan.jobs.len());
+        for job in &plan.jobs {
+            if job.credential_id != plan.credential_id {
+                return Err(anyhow!(
+                    "mdoc digest plan contains inconsistent credential identity"
+                ));
+            }
+            let identity = (job.credential_id, job.job_id);
+            if !expected_identities.insert(identity) {
+                return Err(anyhow!("mdoc digest plan contains duplicate job identity"));
+            }
+
+            let result = results_by_identity
+                .remove(&identity)
+                .ok_or_else(|| anyhow!("digest executor omitted a planned result"))?;
+            if result.ordinal != job.ordinal {
+                return Err(anyhow!("digest executor changed result identity metadata"));
+            }
+            if result.digest.len() != digest_length(job.algorithm) {
+                return Err(anyhow!("digest executor returned an invalid digest length"));
+            }
+            digests_by_identity.insert(identity, result.digest);
         }
-        if result.digest.len() != digest_length(job.algorithm) {
-            return Err(anyhow!("digest executor returned an invalid digest length"));
+
+        let mut namespaces = BTreeMap::new();
+        for namespace in &plan.namespaces {
+            let mut digest_ids = BTreeMap::new();
+            for planned_digest in &namespace.digests {
+                if planned_digest.credential_id != plan.credential_id {
+                    return Err(anyhow!(
+                        "mdoc digest plan contains inconsistent credential identity"
+                    ));
+                }
+                let identity = (planned_digest.credential_id, planned_digest.job_id);
+                let digest = digests_by_identity
+                    .remove(&identity)
+                    .ok_or_else(|| anyhow!("mdoc digest plan references an unknown job"))?;
+                if digest_ids
+                    .insert(planned_digest.digest_id, digest.into())
+                    .is_some()
+                {
+                    return Err(anyhow!(
+                        "mdoc digest plan contains a duplicate digest ID within a namespace"
+                    ));
+                }
+            }
+            if namespaces
+                .insert(namespace.name.clone(), digest_ids)
+                .is_some()
+            {
+                return Err(anyhow!("mdoc digest plan contains a duplicate namespace"));
+            }
         }
-        digests_by_identity.insert(identity, result.digest);
+        if !digests_by_identity.is_empty() {
+            return Err(anyhow!("mdoc digest plan contains an unreferenced job"));
+        }
+        batches.push(namespaces);
     }
     if !results_by_identity.is_empty() {
         return Err(anyhow!("digest executor returned an unexpected result"));
     }
 
-    let mut namespaces = BTreeMap::new();
-    for namespace in &plan.namespaces {
-        let mut digest_ids = BTreeMap::new();
-        for planned_digest in &namespace.digests {
-            let identity = (planned_digest.credential_id, planned_digest.job_id);
-            let digest = digests_by_identity
-                .remove(&identity)
-                .ok_or_else(|| anyhow!("mdoc digest plan references an unknown job"))?;
-            if digest_ids
-                .insert(planned_digest.digest_id, digest.into())
-                .is_some()
-            {
-                return Err(anyhow!(
-                    "mdoc digest plan contains a duplicate digest ID within a namespace"
-                ));
-            }
-        }
-        if namespaces
-            .insert(namespace.name.clone(), digest_ids)
-            .is_some()
-        {
-            return Err(anyhow!("mdoc digest plan contains a duplicate namespace"));
-        }
-    }
-    if !digests_by_identity.is_empty() {
-        return Err(anyhow!("mdoc digest plan contains an unreferenced job"));
-    }
-
-    Ok(namespaces)
+    Ok(batches)
 }
 
 fn generate_digest_id<R>(used_ids: &mut HashSet<DigestId>, rng: &mut R) -> DigestId
@@ -1231,6 +1302,31 @@ pub mod test {
         .collect()
     }
 
+    fn two_credential_digest_plans() -> anyhow::Result<Vec<MdocDigestPlan>> {
+        [(91u64, 0x4344_4c41u64), (7, 0x4344_4c42)]
+            .into_iter()
+            .map(|(credential_id, seed)| {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let issuer_namespaces = to_issuer_namespaces(small_namespaces(), &mut rng)?;
+                plan_digest_namespaces_for_credential(
+                    credential_id,
+                    &issuer_namespaces,
+                    DigestAlgorithm::SHA256,
+                    false,
+                    &mut rng,
+                )
+            })
+            .collect()
+    }
+
+    fn execute_digest_batch(plans: &[MdocDigestPlan]) -> anyhow::Result<Vec<DigestResult>> {
+        let jobs: Vec<_> = plans
+            .iter()
+            .flat_map(|plan| plan.jobs.iter().cloned())
+            .collect();
+        Ok(SerialDigestExecutor.execute(&jobs)?)
+    }
+
     /// Reproduces the old item planning path with an injected random tape.
     fn legacy_to_issuer_namespaces<R>(
         namespaces: Namespaces,
@@ -1490,6 +1586,190 @@ pub mod test {
                 assert!(job.ordinal >= real_count);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn single_credential_planning_preserves_zero_identity_and_random_tape() -> anyhow::Result<()> {
+        let seed = 0x4344_4c41;
+        let mut existing_rng = ReplayRng::seed_from_u64(seed);
+        let existing_namespaces = to_issuer_namespaces(small_namespaces(), &mut existing_rng)?;
+        let existing_plan = plan_digest_namespaces(
+            &existing_namespaces,
+            DigestAlgorithm::SHA512,
+            true,
+            &mut existing_rng,
+        )?;
+
+        let mut explicit_rng = ReplayRng::seed_from_u64(seed);
+        let explicit_namespaces = to_issuer_namespaces(small_namespaces(), &mut explicit_rng)?;
+        let explicit_plan = plan_digest_namespaces_for_credential(
+            MDOC_CREDENTIAL_ID,
+            &explicit_namespaces,
+            DigestAlgorithm::SHA512,
+            true,
+            &mut explicit_rng,
+        )?;
+
+        assert!(existing_plan == explicit_plan);
+        assert_eq!(existing_rng.gen::<u64>(), explicit_rng.gen::<u64>());
+        assert_eq!(existing_plan.credential_id, MDOC_CREDENTIAL_ID);
+        assert!(existing_plan
+            .jobs
+            .iter()
+            .all(|job| job.credential_id == MDOC_CREDENTIAL_ID));
+        assert!(existing_plan.namespaces.iter().all(|namespace| {
+            namespace
+                .digests
+                .iter()
+                .all(|digest| digest.credential_id == MDOC_CREDENTIAL_ID)
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn combined_credential_jobs_restore_by_pair_in_plan_order() -> anyhow::Result<()> {
+        let plans = two_credential_digest_plans()?;
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan.credential_id)
+                .collect::<Vec<_>>(),
+            vec![91, 7],
+            "the input plan order intentionally differs from credential ID order"
+        );
+
+        let expected = plans
+            .iter()
+            .map(|plan| assemble_digest_namespaces(plan, SerialDigestExecutor.execute(&plan.jobs)?))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        assert_ne!(expected[0], expected[1]);
+
+        let mut combined_results = execute_digest_batch(&plans)?;
+        combined_results.reverse();
+        let actual = assemble_reordered_digest_batches(&plans, combined_results)?;
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn credential_batch_rejects_cross_credential_and_result_corruption() -> anyhow::Result<()> {
+        let plans = two_credential_digest_plans()?;
+        let valid_results = execute_digest_batch(&plans)?;
+
+        let first_results = SerialDigestExecutor.execute(&plans[0].jobs)?;
+        let second_results = SerialDigestExecutor.execute(&plans[1].jobs)?;
+        let mut grafted_results = first_results.clone();
+        grafted_results.push(second_results[0].clone());
+        assert_eq!(
+            assemble_digest_namespaces(&plans[0], grafted_results)
+                .expect_err("another credential's result must not be grafted into a plan")
+                .to_string(),
+            "digest executor returned an unexpected result"
+        );
+
+        for (plan, results) in [
+            (&plans[0], second_results.clone()),
+            (&plans[1], first_results),
+        ] {
+            assert_eq!(
+                assemble_digest_namespaces(plan, results)
+                    .expect_err("results from another credential must not be grafted")
+                    .to_string(),
+                "digest executor omitted a planned result"
+            );
+        }
+
+        let mut duplicate = valid_results.clone();
+        duplicate.push(duplicate[0].clone());
+        assert_eq!(
+            assemble_reordered_digest_batches(&plans, duplicate)
+                .expect_err("duplicate result identities must be rejected")
+                .to_string(),
+            "digest executor returned duplicate result identity"
+        );
+
+        let mut missing = valid_results.clone();
+        missing.remove(0);
+        assert_eq!(
+            assemble_reordered_digest_batches(&plans, missing)
+                .expect_err("missing results must be rejected")
+                .to_string(),
+            "digest executor omitted a planned result"
+        );
+
+        let mut unexpected = valid_results.clone();
+        let mut extra = unexpected[0].clone();
+        extra.credential_id = u64::MAX;
+        extra.job_id = u64::MAX;
+        unexpected.push(extra);
+        assert_eq!(
+            assemble_reordered_digest_batches(&plans, unexpected)
+                .expect_err("unexpected results must be rejected")
+                .to_string(),
+            "digest executor returned an unexpected result"
+        );
+
+        let mut wrong_ordinal = valid_results.clone();
+        wrong_ordinal[0].ordinal = usize::MAX;
+        assert_eq!(
+            assemble_reordered_digest_batches(&plans, wrong_ordinal)
+                .expect_err("changed ordinals must be rejected")
+                .to_string(),
+            "digest executor changed result identity metadata"
+        );
+
+        let mut wrong_digest_length = valid_results.clone();
+        wrong_digest_length[0].digest.pop();
+        assert_eq!(
+            assemble_reordered_digest_batches(&plans, wrong_digest_length)
+                .expect_err("invalid digest lengths must be rejected")
+                .to_string(),
+            "digest executor returned an invalid digest length"
+        );
+
+        let mut wrong_plan_identity = plans.clone();
+        wrong_plan_identity[0].credential_id = u64::MAX;
+        assert_eq!(
+            assemble_reordered_digest_batches(&wrong_plan_identity, valid_results.clone())
+                .expect_err("a plan must own every job and digest identity")
+                .to_string(),
+            "mdoc digest plan contains inconsistent credential identity"
+        );
+
+        let mut swapped_planned_digests = plans.clone();
+        let (first, second) = swapped_planned_digests.split_at_mut(1);
+        std::mem::swap(
+            &mut first[0].namespaces[0].digests[0],
+            &mut second[0].namespaces[0].digests[0],
+        );
+        assert_eq!(
+            assemble_reordered_digest_batches(&swapped_planned_digests, valid_results.clone())
+                .expect_err("planned digests must not cross credential plans")
+                .to_string(),
+            "mdoc digest plan contains inconsistent credential identity"
+        );
+
+        let mut swapped_jobs = plans.clone();
+        let (first, second) = swapped_jobs.split_at_mut(1);
+        std::mem::swap(&mut first[0].jobs[0], &mut second[0].jobs[0]);
+        assert_eq!(
+            assemble_reordered_digest_batches(&swapped_jobs, valid_results.clone())
+                .expect_err("digest jobs must not cross credential plans")
+                .to_string(),
+            "mdoc digest plan contains inconsistent credential identity"
+        );
+
+        let mut duplicate_plan_identity = plans;
+        duplicate_plan_identity[1].credential_id = duplicate_plan_identity[0].credential_id;
+        assert_eq!(
+            assemble_reordered_digest_batches(&duplicate_plan_identity, valid_results)
+                .expect_err("batch credential identities must be unique")
+                .to_string(),
+            "mdoc digest batch contains duplicate credential identity"
+        );
+
         Ok(())
     }
 
@@ -2070,6 +2350,7 @@ pub mod test {
         let mut jobs = Vec::new();
         let mut next_job_id = 0;
         let digests = plan_digest_namespace(
+            MDOC_CREDENTIAL_ID,
             items,
             algorithm,
             enable_decoy_digests,
@@ -2078,6 +2359,7 @@ pub mod test {
             &mut jobs,
         )?;
         let plan = MdocDigestPlan {
+            credential_id: MDOC_CREDENTIAL_ID,
             namespaces: vec![PlannedMdocNamespace {
                 name: "org.example.fixed".to_owned(),
                 digests,
