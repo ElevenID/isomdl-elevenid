@@ -80,11 +80,11 @@ pub struct DigestExecutionError;
 ///
 /// Job identities are scoped to one `execute` call. An executor shared by
 /// concurrent callers must isolate those calls and must not merge their jobs
-/// solely by `(credential_id, job_id)`. A future batch API can assign distinct
-/// credential IDs before submitting several credentials in one call. Callers
-/// can validate result identities and lengths, but validating same-length
-/// digest contents would repeat the work; executors therefore remain inside
-/// the issuer's trusted computing boundary.
+/// solely by `(credential_id, job_id)`. The mdoc batch API accepts distinct,
+/// caller-assigned credential IDs before submitting several credentials in one
+/// call. Callers can validate result identities and lengths, but validating
+/// same-length digest contents would repeat the work; executors therefore
+/// remain inside the issuer's trusted computing boundary.
 pub trait DigestExecutor: Send + Sync {
     fn execute(&self, jobs: &[DigestJob]) -> Result<Vec<DigestResult>, DigestExecutionError>;
 }

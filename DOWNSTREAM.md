@@ -27,6 +27,8 @@ ElevenID keeps local changes small and reviewable:
    worker pool, a fixed process-wide worker budget, and serial fallback on
    contention or WebAssembly. Public preparation remains serial unless a
    caller explicitly selects the executor inside the issuer trust boundary.
+6. Expose caller-ordered, cross-credential mdoc preparation with explicit
+   credential identities and the scalar executor as the public batch default.
 
 The third correction is covered by an ElevenID-owned regression harness using
 the observed OIDF Multipaz interoperability vector. The harness is not
@@ -43,16 +45,6 @@ and signer handles never cross the executor boundary. Criterion fixtures track
 end-to-end preparation plus scalar and opt-in native digest throughput without
 logging per-item metadata.
 
-The internal mdoc digest plan can assign distinct credential identities so one
-trusted executor call can carry jobs from more than one future credential plan.
-Assembly restores results by `(credential_id, job_id)`, validates each job and
-planned digest against its owning plan, and preserves input plan order. This is
-structural validation of metadata that the trusted executor promises to
-preserve, not cryptographic authentication of result metadata; assembly does
-not repeat the digest operation. Existing public single-credential entry points
-continue to assign credential identity zero, and no public batch API or default
-parallel route is introduced by this change.
-
 The fifth change adds an execution candidate, not default routing or a general
 mdoc speedup claim. The reusable pool owns at most eight native threads across
 the process, and a permit budget bounds work admitted to those threads.
@@ -68,6 +60,21 @@ admission and contention fallback, post-panic reuse, decoys, fixed-random MSO
 bytes, namespaces, and signature payloads. The benchmark reuses the pool while
 retaining dispatch and synchronization costs. Stage and batch measurements
 remain required before any adaptive or default activation.
+
+The public mdoc batch API validates every caller-ordered item and rejects
+duplicate credential identities before constructing its RNG. Planning then
+allocates one random tape strictly in input order and submits every credential's
+jobs through one trusted executor call. Assembly restores results by
+`(credential_id, job_id)`, validates each job and planned digest against its
+owning plan, and returns identity-paired prepared mdocs in caller order. This is
+structural validation of metadata that the trusted executor promises to
+preserve, not cryptographic authentication of result metadata; assembly does
+not repeat the digest operation. An empty batch performs no RNG or executor
+work, and any error returns no prepared prefix. Existing public
+single-credential entry points continue to assign credential identity zero and
+retain the scalar route. Batch preparation also defaults to the scalar executor;
+selecting another executor remains explicit, does not sign or issue a
+credential, and does not activate a service route.
 
 ## Upstream maintenance
 
