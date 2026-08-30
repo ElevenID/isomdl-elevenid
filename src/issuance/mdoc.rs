@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+};
 
 use anyhow::{anyhow, Result};
 use async_signature::AsyncSigner;
@@ -51,6 +54,116 @@ pub struct Builder {
     digest_algorithm: Option<DigestAlgorithm>,
     device_key_info: Option<DeviceKeyInfo>,
     enable_decoy_digests: Option<bool>,
+}
+
+/// One caller-ordered mdoc preparation in a digest batch.
+///
+/// `credential_id` must be unique within one batch. It is routing metadata for
+/// restoring digest results and is not encoded into the mdoc. The builder has
+/// exactly the same required fields and decoy default as [`Builder::prepare`].
+///
+/// The value can contain sensitive credential claims. Its [`Debug`]
+/// representation is therefore redacted.
+#[derive(Clone)]
+pub struct MdocBatchItem {
+    credential_id: u64,
+    builder: Builder,
+    signature_algorithm: Algorithm,
+}
+
+impl MdocBatchItem {
+    /// Create one batch item from an existing mdoc builder.
+    pub fn new(credential_id: u64, builder: Builder, signature_algorithm: Algorithm) -> Self {
+        Self {
+            credential_id,
+            builder,
+            signature_algorithm,
+        }
+    }
+
+    /// Return the caller-assigned identity used to isolate this credential's jobs.
+    pub fn credential_id(&self) -> u64 {
+        self.credential_id
+    }
+}
+
+impl fmt::Debug for MdocBatchItem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MdocBatchItem")
+            .field("contents", &"[redacted]")
+            .finish()
+    }
+}
+
+/// One prepared mdoc restored to its caller-assigned batch identity.
+///
+/// Batch results retain caller order. Keeping the identity paired with the
+/// prepared value also lets callers verify that association without changing
+/// the legacy [`PreparedMdoc`] representation.
+///
+/// The wrapper deliberately does not implement [`Serialize`], so adopting the
+/// batch API cannot silently change an existing serialized `PreparedMdoc`
+/// envelope:
+///
+/// ```compile_fail
+/// use isomdl::issuance::PreparedMdocBatchItem;
+///
+/// fn serialize_wrapper(item: &PreparedMdocBatchItem) {
+///     let _ = serde_json::to_vec(item).unwrap();
+/// }
+/// ```
+#[derive(Clone)]
+pub struct PreparedMdocBatchItem {
+    credential_id: u64,
+    prepared_mdoc: PreparedMdoc,
+}
+
+impl PreparedMdocBatchItem {
+    /// Return the caller-assigned identity for this prepared mdoc.
+    pub fn credential_id(&self) -> u64 {
+        self.credential_id
+    }
+
+    /// Borrow the prepared mdoc.
+    pub fn prepared_mdoc(&self) -> &PreparedMdoc {
+        &self.prepared_mdoc
+    }
+
+    /// Consume the batch result and return the legacy prepared mdoc value.
+    pub fn into_prepared_mdoc(self) -> PreparedMdoc {
+        self.prepared_mdoc
+    }
+}
+
+impl fmt::Debug for PreparedMdocBatchItem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedMdocBatchItem")
+            .field("contents", &"[redacted]")
+            .finish()
+    }
+}
+
+struct ValidatedMdocBatchItem {
+    credential_id: u64,
+    doc_type: String,
+    namespaces: Namespaces,
+    validity_info: ValidityInfo,
+    digest_algorithm: DigestAlgorithm,
+    device_key_info: DeviceKeyInfo,
+    signature_algorithm: Algorithm,
+    enable_decoy_digests: bool,
+}
+
+struct PlannedMdocBatchItem {
+    credential_id: u64,
+    doc_type: String,
+    issuer_namespaces: IssuerNamespaces,
+    validity_info: ValidityInfo,
+    digest_algorithm: DigestAlgorithm,
+    device_key_info: DeviceKeyInfo,
+    signature_algorithm: Algorithm,
 }
 
 impl Mdoc {
@@ -118,6 +231,149 @@ impl Mdoc {
             &mut rng,
             digest_executor,
         )
+    }
+
+    /// Prepare a caller-ordered batch of mdocs for remote signing.
+    ///
+    /// The scalar [`SerialDigestExecutor`] is the normative default. All batch
+    /// inputs are validated before randomness is allocated. Randomness is then
+    /// consumed strictly in caller order, all digest jobs are submitted once,
+    /// and results are restored by `(credential_id, job_id)` before any
+    /// prepared value is returned. An empty batch returns an empty vector
+    /// without invoking an executor.
+    ///
+    /// This operation only prepares existing COSE signature payloads. It does
+    /// not sign, issue, activate, or change the default route of any existing
+    /// single-credential entry point. Any error discards the entire batch.
+    pub fn prepare_batch(batch: Vec<MdocBatchItem>) -> Result<Vec<PreparedMdocBatchItem>> {
+        Self::prepare_batch_with_digest_executor(batch, &SerialDigestExecutor)
+    }
+
+    /// Prepare a caller-ordered batch with one caller-selected digest executor.
+    ///
+    /// After a non-empty batch validates and plans successfully, the executor
+    /// is invoked exactly once. It receives encoded issuer-signed items from
+    /// every credential, which can contain sensitive claims, and must remain
+    /// inside the issuer's trusted computing boundary. Signing keys and signer
+    /// handles never cross this boundary. Results may be returned in any order
+    /// but must satisfy the [`DigestExecutor`] identity and completeness
+    /// contract.
+    ///
+    /// Validation, planning, execution, restoration, and preparation are
+    /// all-or-nothing: no [`PreparedMdocBatchItem`] is returned on any error.
+    /// This method does not sign, issue, activate, or alter default routing.
+    pub fn prepare_batch_with_digest_executor<E>(
+        batch: Vec<MdocBatchItem>,
+        digest_executor: &E,
+    ) -> Result<Vec<PreparedMdocBatchItem>>
+    where
+        E: DigestExecutor + ?Sized,
+    {
+        Self::prepare_batch_with_digest_executor_and_rng_factory(
+            batch,
+            digest_executor,
+            rand::thread_rng,
+        )
+    }
+
+    fn prepare_batch_with_digest_executor_and_rng_factory<R, E, F>(
+        batch: Vec<MdocBatchItem>,
+        digest_executor: &E,
+        make_rng: F,
+    ) -> Result<Vec<PreparedMdocBatchItem>>
+    where
+        R: CryptoRng + Rng,
+        E: DigestExecutor + ?Sized,
+        F: FnOnce() -> R,
+    {
+        let batch = validate_mdoc_batch(batch)?;
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Construct the RNG only after the entire batch has passed validation.
+        // The factory also makes this ordering directly observable in tests.
+        let mut rng = make_rng();
+        Self::prepare_batch_with_validated_inputs_rng_and_digest_executor(
+            batch,
+            &mut rng,
+            digest_executor,
+        )
+    }
+
+    fn prepare_batch_with_validated_inputs_rng_and_digest_executor<R, E>(
+        batch: Vec<ValidatedMdocBatchItem>,
+        rng: &mut R,
+        digest_executor: &E,
+    ) -> Result<Vec<PreparedMdocBatchItem>>
+    where
+        R: CryptoRng + Rng + ?Sized,
+        E: DigestExecutor + ?Sized,
+    {
+        let mut planned_items = Vec::with_capacity(batch.len());
+        let mut digest_plans = Vec::with_capacity(batch.len());
+
+        // Keep all stateful planning on this caller thread and in exact input
+        // order. No executor can observe a partially planned batch.
+        for item in batch {
+            let issuer_namespaces = to_issuer_namespaces(item.namespaces, rng)?;
+            let digest_plan = plan_digest_namespaces_for_credential(
+                item.credential_id,
+                &issuer_namespaces,
+                item.digest_algorithm,
+                item.enable_decoy_digests,
+                rng,
+            )?;
+            planned_items.push(PlannedMdocBatchItem {
+                credential_id: item.credential_id,
+                doc_type: item.doc_type,
+                issuer_namespaces,
+                validity_info: item.validity_info,
+                digest_algorithm: item.digest_algorithm,
+                device_key_info: item.device_key_info,
+                signature_algorithm: item.signature_algorithm,
+            });
+            digest_plans.push(digest_plan);
+        }
+
+        let job_count = digest_plans.iter().try_fold(0usize, |count, plan| {
+            count
+                .checked_add(plan.jobs.len())
+                .ok_or_else(|| anyhow!("too many mdoc digest jobs in batch"))
+        })?;
+        let mut jobs = Vec::with_capacity(job_count);
+        for plan in &digest_plans {
+            jobs.extend_from_slice(&plan.jobs);
+        }
+
+        let results = digest_executor.execute(&jobs)?;
+        let value_digests = assemble_reordered_digest_batches(&digest_plans, results)?;
+        if value_digests.len() != planned_items.len() {
+            return Err(anyhow!("mdoc digest batch omitted a planned credential"));
+        }
+
+        // Finish every item in local storage. `collect` returns no vector if a
+        // later serialization/preparation fails, so callers cannot observe a
+        // successfully prepared prefix.
+        planned_items
+            .into_iter()
+            .zip(value_digests)
+            .map(|(item, value_digests)| {
+                let prepared_mdoc = Self::finish_preparation(
+                    item.doc_type,
+                    item.issuer_namespaces,
+                    item.validity_info,
+                    item.digest_algorithm,
+                    item.device_key_info,
+                    item.signature_algorithm,
+                    value_digests,
+                )?;
+                Ok(PreparedMdocBatchItem {
+                    credential_id: item.credential_id,
+                    prepared_mdoc,
+                })
+            })
+            .collect()
     }
 
     // The public entry point validates authorizations and namespace shape
@@ -456,6 +712,62 @@ impl Builder {
         )
         .await
     }
+}
+
+fn validate_mdoc_batch(batch: Vec<MdocBatchItem>) -> Result<Vec<ValidatedMdocBatchItem>> {
+    let mut credential_ids = HashSet::with_capacity(batch.len());
+    let mut validated = Vec::with_capacity(batch.len());
+
+    // Select errors deterministically in caller order. Batch identity is
+    // checked before the current item's builder fields, then builder errors use
+    // the same precedence as `Builder::prepare_with_digest_executor`.
+    for item in batch {
+        if !credential_ids.insert(item.credential_id) {
+            return Err(anyhow!(
+                "mdoc preparation batch contains duplicate credential identity"
+            ));
+        }
+
+        let doc_type = item
+            .builder
+            .doc_type
+            .ok_or_else(|| anyhow!("missing parameter: 'doc_type'"))?;
+        let namespaces = item
+            .builder
+            .namespaces
+            .ok_or_else(|| anyhow!("missing parameter: 'namespaces'"))?;
+        let validity_info = item
+            .builder
+            .validity_info
+            .ok_or_else(|| anyhow!("missing parameter: 'validity_info'"))?;
+        let digest_algorithm = item
+            .builder
+            .digest_algorithm
+            .ok_or_else(|| anyhow!("missing parameter: 'digest_algorithm'"))?;
+        let device_key_info = item
+            .builder
+            .device_key_info
+            .ok_or_else(|| anyhow!("missing parameter: 'device_key_info'"))?;
+        let enable_decoy_digests = item.builder.enable_decoy_digests.unwrap_or(true);
+
+        if let Some(authorizations) = &device_key_info.key_authorizations {
+            authorizations.validate()?;
+        }
+        validate_namespace_shape(&namespaces)?;
+
+        validated.push(ValidatedMdocBatchItem {
+            credential_id: item.credential_id,
+            doc_type,
+            namespaces,
+            validity_info,
+            digest_algorithm,
+            device_key_info,
+            signature_algorithm: item.signature_algorithm,
+            enable_decoy_digests,
+        });
+    }
+
+    Ok(validated)
 }
 
 fn validate_namespace_shape(namespaces: &Namespaces) -> Result<()> {
@@ -895,7 +1207,10 @@ pub mod test {
     use rand::{RngCore, SeedableRng};
     use sha2::{Digest, Sha256, Sha384, Sha512};
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
     use time::OffsetDateTime;
 
     use crate::definitions::device_key::cose_key::{CoseKey, EC2Curve, EC2Y};
@@ -1203,6 +1518,10 @@ pub mod test {
         ExtraFirst,
         DuplicateFuture,
         MissingFirst,
+        ChangedOrdinal,
+        ChangedCredential,
+        ChangedJob,
+        InvalidLength,
         InvalidLengthAndDuplicate,
     }
 
@@ -1231,6 +1550,18 @@ pub mod test {
                 }
                 ResultSetFault::MissingFirst => {
                     results.remove(0);
+                }
+                ResultSetFault::ChangedOrdinal => {
+                    results[0].ordinal = usize::MAX;
+                }
+                ResultSetFault::ChangedCredential => {
+                    results[0].credential_id = u64::MAX;
+                }
+                ResultSetFault::ChangedJob => {
+                    results[0].job_id = u64::MAX;
+                }
+                ResultSetFault::InvalidLength => {
+                    results[0].digest.pop();
                 }
                 ResultSetFault::InvalidLengthAndDuplicate => {
                     results[0].digest.pop();
@@ -1271,6 +1602,25 @@ pub mod test {
         jobs: AtomicUsize,
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingReversingDigestExecutor {
+        calls: AtomicUsize,
+        jobs: Mutex<Vec<DigestJob>>,
+    }
+
+    impl DigestExecutor for RecordingReversingDigestExecutor {
+        fn execute(
+            &self,
+            jobs: &[DigestJob],
+        ) -> std::result::Result<Vec<DigestResult>, DigestExecutionError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            *self.jobs.lock().expect("recording lock must be available") = jobs.to_vec();
+            let mut results = SerialDigestExecutor.execute(jobs)?;
+            results.reverse();
+            Ok(results)
+        }
+    }
+
     impl DigestExecutor for CountingDigestExecutor {
         fn execute(
             &self,
@@ -1299,6 +1649,50 @@ pub mod test {
             ),
         ]
         .into_iter()
+        .collect()
+    }
+
+    fn mdoc_batch_items() -> Vec<MdocBatchItem> {
+        let builder = minimal_test_mdoc_builder().namespaces(small_namespaces());
+        [
+            (
+                91,
+                "org.example.batch.first",
+                DigestAlgorithm::SHA256,
+                Some(false),
+                Algorithm::ES256,
+            ),
+            (
+                7,
+                "org.example.batch.second",
+                DigestAlgorithm::SHA384,
+                None,
+                Algorithm::ES384,
+            ),
+            (
+                42,
+                "org.example.batch.third",
+                DigestAlgorithm::SHA512,
+                Some(false),
+                Algorithm::ES512,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(credential_id, doc_type, digest_algorithm, enable_decoy_digests, algorithm)| {
+                let builder = builder
+                    .clone()
+                    .doc_type(doc_type.to_owned())
+                    .digest_algorithm(digest_algorithm);
+                let builder = match enable_decoy_digests {
+                    Some(enable_decoy_digests) => {
+                        builder.enable_decoy_digests(enable_decoy_digests)
+                    }
+                    None => builder,
+                };
+                MdocBatchItem::new(credential_id, builder, algorithm)
+            },
+        )
         .collect()
     }
 
@@ -1587,6 +1981,214 @@ pub mod test {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn mdoc_batch_matches_sequential_single_preparation_on_a_fixed_tape() -> anyhow::Result<()> {
+        let items = mdoc_batch_items();
+        let sequential_items = validate_mdoc_batch(items.clone())?;
+        let batch_items = validate_mdoc_batch(items)?;
+        let seed = 0x4344_4c41_4241_5443;
+
+        let mut sequential_rng = ReplayRng::seed_from_u64(seed);
+        let mut sequential = Vec::with_capacity(sequential_items.len());
+        for item in sequential_items {
+            let prepared_mdoc = Mdoc::prepare_with_validated_inputs_rng_and_digest_executor(
+                item.doc_type,
+                item.namespaces,
+                item.validity_info,
+                item.digest_algorithm,
+                item.device_key_info,
+                item.signature_algorithm,
+                item.enable_decoy_digests,
+                &mut sequential_rng,
+                &SerialDigestExecutor,
+            )?;
+            sequential.push((item.credential_id, prepared_mdoc));
+        }
+        let sequential_tail = sequential_rng.gen::<u64>();
+
+        let executor = RecordingReversingDigestExecutor::default();
+        let mut batch_rng = ReplayRng::seed_from_u64(seed);
+        let batch = Mdoc::prepare_batch_with_validated_inputs_rng_and_digest_executor(
+            batch_items,
+            &mut batch_rng,
+            &executor,
+        )?;
+        let batch_tail = batch_rng.gen::<u64>();
+
+        assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(batch.len(), sequential.len());
+        assert_eq!(batch_tail, sequential_tail);
+        for ((expected_id, expected), actual) in sequential.iter().zip(&batch) {
+            assert_eq!(actual.credential_id(), *expected_id);
+            assert_eq!(
+                actual.prepared_mdoc().signature_payload(),
+                expected.signature_payload()
+            );
+            assert_eq!(
+                crate::cbor::to_vec(actual.prepared_mdoc())?,
+                crate::cbor::to_vec(expected)?,
+                "the identity wrapper must leave legacy PreparedMdoc serialization unchanged"
+            );
+        }
+
+        let owned = batch[0].clone().into_prepared_mdoc();
+        assert_eq!(
+            crate::cbor::to_vec(&owned)?,
+            crate::cbor::to_vec(&sequential[0].1)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_batch_submits_once_and_restores_caller_identity_order() -> anyhow::Result<()> {
+        let items = mdoc_batch_items();
+        assert_eq!(
+            format!("{:?}", items[0]),
+            "MdocBatchItem { contents: \"[redacted]\" }"
+        );
+        let expected_ids: Vec<_> = items.iter().map(MdocBatchItem::credential_id).collect();
+        assert_eq!(expected_ids, vec![91, 7, 42]);
+        let executor = RecordingReversingDigestExecutor::default();
+
+        let prepared = Mdoc::prepare_batch_with_digest_executor(items, &executor)?;
+
+        assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            prepared
+                .iter()
+                .map(PreparedMdocBatchItem::credential_id)
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert!(prepared
+            .iter()
+            .all(|item| !item.prepared_mdoc().signature_payload().is_empty()));
+
+        let jobs = executor
+            .jobs
+            .lock()
+            .expect("recording lock must be available");
+        let mut cursor = 0;
+        for credential_id in &expected_ids {
+            let start = cursor;
+            while cursor < jobs.len() && jobs[cursor].credential_id == *credential_id {
+                assert_eq!(jobs[cursor].job_id, (cursor - start) as u64);
+                cursor += 1;
+            }
+            assert!(cursor > start, "each valid credential must contribute jobs");
+        }
+        assert_eq!(cursor, jobs.len(), "jobs must be flat in caller plan order");
+
+        assert_eq!(
+            format!("{:?}", prepared[0]),
+            "PreparedMdocBatchItem { contents: \"[redacted]\" }"
+        );
+
+        let serial = Mdoc::prepare_batch(mdoc_batch_items())?;
+        assert_eq!(
+            serial
+                .iter()
+                .map(PreparedMdocBatchItem::credential_id)
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn batch_validation_and_empty_input_precede_rng_and_execution() -> anyhow::Result<()> {
+        let first = mdoc_batch_items().remove(0);
+        let missing_doc_type = MdocBatchItem::new(13, Builder::default(), Algorithm::ES256);
+        let rng_factory_calls = AtomicUsize::new(0);
+        let error = Mdoc::prepare_batch_with_digest_executor_and_rng_factory(
+            vec![first.clone(), missing_doc_type],
+            &PanicDigestExecutor,
+            || {
+                rng_factory_calls.fetch_add(1, Ordering::Relaxed);
+                ReplayRng::seed_from_u64(1)
+            },
+        )
+        .expect_err("a later invalid item must reject the whole batch before RNG");
+        assert_eq!(error.to_string(), "missing parameter: 'doc_type'");
+        assert_eq!(rng_factory_calls.load(Ordering::Relaxed), 0);
+
+        let duplicate_with_invalid_builder =
+            MdocBatchItem::new(first.credential_id(), Builder::default(), Algorithm::ES256);
+        let error = Mdoc::prepare_batch_with_digest_executor_and_rng_factory(
+            vec![first, duplicate_with_invalid_builder],
+            &PanicDigestExecutor,
+            || {
+                rng_factory_calls.fetch_add(1, Ordering::Relaxed);
+                ReplayRng::seed_from_u64(2)
+            },
+        )
+        .expect_err("duplicate batch identity must precede its builder errors and RNG");
+        assert_eq!(
+            error.to_string(),
+            "mdoc preparation batch contains duplicate credential identity"
+        );
+        assert_eq!(rng_factory_calls.load(Ordering::Relaxed), 0);
+
+        let empty = Mdoc::prepare_batch_with_digest_executor_and_rng_factory(
+            Vec::new(),
+            &PanicDigestExecutor,
+            || -> ReplayRng { panic!("empty batches must not construct an RNG") },
+        )?;
+        assert!(empty.is_empty());
+        assert!(Mdoc::prepare_batch(Vec::new())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn public_batch_errors_return_no_prepared_prefix() {
+        let error =
+            Mdoc::prepare_batch_with_digest_executor(mdoc_batch_items(), &FailingDigestExecutor)
+                .expect_err("executor failure must discard every planned credential");
+        assert_eq!(error.to_string(), "digest execution failed");
+
+        for (fault, expected_error) in [
+            (
+                ResultSetFault::ExtraFirst,
+                "digest executor returned an unexpected result",
+            ),
+            (
+                ResultSetFault::DuplicateFuture,
+                "digest executor returned duplicate result identity",
+            ),
+            (
+                ResultSetFault::MissingFirst,
+                "digest executor omitted a planned result",
+            ),
+            (
+                ResultSetFault::ChangedOrdinal,
+                "digest executor changed result identity metadata",
+            ),
+            (
+                ResultSetFault::ChangedCredential,
+                "digest executor omitted a planned result",
+            ),
+            (
+                ResultSetFault::ChangedJob,
+                "digest executor omitted a planned result",
+            ),
+            (
+                ResultSetFault::InvalidLength,
+                "digest executor returned an invalid digest length",
+            ),
+            (
+                ResultSetFault::InvalidLengthAndDuplicate,
+                "digest executor returned duplicate result identity",
+            ),
+        ] {
+            let error = Mdoc::prepare_batch_with_digest_executor(
+                mdoc_batch_items(),
+                &FaultyDigestExecutor(fault),
+            )
+            .expect_err("a structurally malformed combined result set must fail closed");
+            assert_eq!(error.to_string(), expected_error);
+        }
     }
 
     #[test]

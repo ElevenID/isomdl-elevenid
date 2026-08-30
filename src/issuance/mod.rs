@@ -3,4 +3,4 @@
 //! The `issuance` module provides functionality for handling issuance related operations.
 pub mod mdoc;
 
-pub use mdoc::{Mdoc, Namespaces};
+pub use mdoc::{Mdoc, MdocBatchItem, Namespaces, PreparedMdocBatchItem};
