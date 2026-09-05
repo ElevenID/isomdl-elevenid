@@ -150,5 +150,13 @@ fn calculate_ble_ident(e_device_key: &Tag24<CoseKey>) -> Result<[u8; 16]> {
 ///     let _ = core::mem::size_of::<SessionManager>();
 /// }
 /// ```
+///
+/// ```compile_fail
+/// use isomdl::definitions::session::create_p256_ephemeral_keys;
+///
+/// fn ephemeral_key_generation_is_not_available() {
+///     let _ = create_p256_ephemeral_keys();
+/// }
+/// ```
 #[cfg(not(feature = "session-key-agreement"))]
 pub struct SessionKeyAgreementDisabled;
