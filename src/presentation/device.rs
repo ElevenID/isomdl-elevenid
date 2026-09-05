@@ -16,6 +16,8 @@
 //!
 //! You can view examples in `tests` directory in `simulated_device_and_reader.rs`, for a basic example and
 //! `simulated_device_and_reader_state.rs` which uses `State` pattern, `Arc` and `Mutex`.
+#[cfg(feature = "issuer-planning")]
+use crate::issuance::Mdoc;
 use crate::{
     cbor,
     cose::{mac0::PreparedCoseMac0, sign1::PreparedCoseSign1, MaybeTagged},
@@ -39,7 +41,6 @@ use crate::{
         },
         CoseKey, DeviceEngagement, DeviceResponse, IssuerSignedItem, Mso, SessionEstablishment,
     },
-    issuance::Mdoc,
 };
 use coset::Label;
 use coset::{CoseMac0Builder, CoseSign1, CoseSign1Builder};
@@ -970,6 +971,7 @@ impl DeviceSession for SessionManager {
     }
 }
 
+#[cfg(feature = "issuer-planning")]
 impl From<Mdoc> for Document {
     fn from(mdoc: Mdoc) -> Document {
         fn extract(

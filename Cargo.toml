@@ -16,8 +16,8 @@ issuer-planning = []
 issuer-local-signing = ["issuer-planning", "dep:async-signature"]
 presentation-verifier = []
 session-key-agreement = ["presentation-verifier"]
-parallel = ["dep:rayon"]
-simd = ["dep:wide"]
+parallel = ["issuer-planning", "dep:rayon"]
+simd = ["issuer-planning", "dep:wide"]
 
 [package.metadata.cargo-machete]
 # Attribute and proc-macro references are not visible to cargo-machete.
@@ -26,6 +26,7 @@ ignored = ["serde_bytes", "strum"]
 [[bin]]
 name = "isomdl-utils"
 path = "src/bin/utils.rs"
+required-features = ["issuer-planning"]
 
 [dependencies]
 anyhow = "1.0"
@@ -87,7 +88,9 @@ x509-cert = { version = "0.2.4", features = ["pem", "builder", "hazmat"] }
 [[bench]]
 name = "mdoc_prepare"
 harness = false
+required-features = ["issuer-planning"]
 
 [[bench]]
 name = "digest_executor"
 harness = false
+required-features = ["issuer-planning"]
