@@ -6,12 +6,11 @@
 //! # Examples
 //!
 //! ```ignore
-//! use ssi_jwk::JWK;
 //! use std::convert::TryInto;
 //! use crate::CoseKey;
 //!
-//! let jwk: JWK = /* ... */;
-//! let cose_key: Result<CoseKey, _> = jwk.try_into();
+//! let cbor_value: ciborium::Value = /* ... */;
+//! let cose_key: Result<CoseKey, _> = cbor_value.try_into();
 //!
 //! match cose_key {
 //!     Ok(key) => {
@@ -24,11 +23,9 @@
 //! ```
 use std::collections::BTreeMap;
 
-use aes::cipher::generic_array::{typenum::U8, GenericArray};
 use coset::iana::Algorithm;
 use p256::EncodedPoint;
 use serde::{Deserialize, Serialize};
-use ssi_jwk::JWK;
 
 /// An implementation of RFC-8152 [COSE_Key](https://datatracker.ietf.org/doc/html/rfc8152#section-13)
 /// restricted to the requirements of ISO/IEC 18013-5:2021.
@@ -215,39 +212,32 @@ impl TryFrom<CoseKey> for EncodedPoint {
                 crv: EC2Curve::P256,
                 x,
                 y,
-            } => {
-                let x_generic_array = GenericArray::from_slice(x.as_ref());
-                match y {
-                    EC2Y::Value(y) => {
-                        let y_generic_array = GenericArray::from_slice(y.as_ref());
-
-                        Ok(EncodedPoint::from_affine_coordinates(
-                            x_generic_array,
-                            y_generic_array,
-                            false,
-                        ))
+            } => match y {
+                EC2Y::Value(y) => {
+                    if x.len() != 32 || y.len() != 32 {
+                        return Err(Error::InvalidCoseKey);
                     }
-                    EC2Y::SignBit(y) => {
-                        let mut bytes = x.clone();
-                        if y {
-                            bytes.insert(0, 3)
-                        } else {
-                            bytes.insert(0, 2)
-                        }
-
-                        let encoded =
-                            EncodedPoint::from_bytes(bytes).map_err(|_e| Error::InvalidCoseKey)?;
-                        Ok(encoded)
-                    }
+                    let mut bytes = Vec::with_capacity(65);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&x);
+                    bytes.extend_from_slice(&y);
+                    EncodedPoint::from_bytes(bytes).map_err(|_| Error::InvalidCoseKey)
                 }
-            }
-            CoseKey::OKP { crv: _, x } => {
-                let x_generic_array: GenericArray<_, U8> =
-                    GenericArray::clone_from_slice(&x[0..42]);
-                let encoded = EncodedPoint::from_bytes(x_generic_array)
-                    .map_err(|_e| Error::InvalidCoseKey)?;
-                Ok(encoded)
-            }
+                EC2Y::SignBit(y) => {
+                    if x.len() != 32 {
+                        return Err(Error::InvalidCoseKey);
+                    }
+                    let mut bytes = Vec::with_capacity(33);
+                    if y {
+                        bytes.push(3)
+                    } else {
+                        bytes.push(2)
+                    }
+                    bytes.extend_from_slice(&x);
+
+                    EncodedPoint::from_bytes(bytes).map_err(|_| Error::InvalidCoseKey)
+                }
+            },
             _ => Err(Error::InvalidCoseKey),
         }
     }
@@ -324,126 +314,6 @@ impl TryFrom<i128> for OKPCurve {
     }
 }
 
-impl TryFrom<JWK> for CoseKey {
-    type Error = Error;
-
-    fn try_from(jwk: JWK) -> Result<Self, Self::Error> {
-        match jwk.params {
-            ssi_jwk::Params::EC(params) => {
-                let x = params
-                    .x_coordinate
-                    .as_ref()
-                    .ok_or(Error::EC2MissingX)?
-                    .0
-                    .clone();
-                Ok(CoseKey::EC2 {
-                    crv: (&params).try_into()?,
-                    x,
-                    y: params.try_into()?,
-                })
-            }
-            ssi_jwk::Params::OKP(params) => Ok(CoseKey::OKP {
-                crv: (&params).try_into()?,
-                x: params.public_key.0.clone(),
-            }),
-            _ => Err(Error::UnsupportedKeyType),
-        }
-    }
-}
-
-impl TryFrom<&ssi_jwk::ECParams> for EC2Curve {
-    type Error = Error;
-
-    fn try_from(params: &ssi_jwk::ECParams) -> Result<Self, Self::Error> {
-        match params.curve.as_ref() {
-            Some(crv) if crv == "P-256" => Ok(Self::P256),
-            Some(crv) if crv == "P-384" => Ok(Self::P384),
-            Some(crv) if crv == "P-521" => Ok(Self::P521),
-            Some(crv) if crv == "secp256k1" => Ok(Self::P256K),
-            Some(_) => Err(Error::UnsupportedCurve),
-            None => Err(Error::UnknownCurve),
-        }
-    }
-}
-
-impl TryFrom<ssi_jwk::ECParams> for EC2Y {
-    type Error = Error;
-
-    fn try_from(params: ssi_jwk::ECParams) -> Result<Self, Self::Error> {
-        if let Some(y) = params.y_coordinate.as_ref() {
-            Ok(Self::Value(y.0.clone()))
-        } else {
-            Err(Error::EC2MissingY)
-        }
-    }
-}
-
-impl TryFrom<CoseKey> for JWK {
-    type Error = Error;
-    fn try_from(cose: CoseKey) -> Result<JWK, Error> {
-        Ok(match cose {
-            CoseKey::EC2 { crv, x, y } => JWK {
-                params: ssi_jwk::Params::EC(ssi_jwk::ECParams {
-                    curve: Some(match crv {
-                        EC2Curve::P256 => "P-256".to_string(),
-                        EC2Curve::P384 => "P-384".to_string(),
-                        EC2Curve::P521 => "P-521".to_string(),
-                        EC2Curve::P256K => "secp256k1".to_string(),
-                    }),
-                    x_coordinate: Some(ssi_jwk::Base64urlUInt(x)),
-                    y_coordinate: match y {
-                        EC2Y::Value(vec) => Some(ssi_jwk::Base64urlUInt(vec)),
-                        EC2Y::SignBit(_) => return Err(Error::UnsupportedFormat),
-                    },
-                    ecc_private_key: None,
-                }),
-                public_key_use: None,
-                key_operations: None,
-                algorithm: None,
-                key_id: None,
-                x509_url: None,
-                x509_certificate_chain: None,
-                x509_thumbprint_sha1: None,
-                x509_thumbprint_sha256: None,
-            },
-            CoseKey::OKP { crv, x } => JWK {
-                params: ssi_jwk::Params::OKP(ssi_jwk::OctetParams {
-                    curve: match crv {
-                        OKPCurve::X25519 => "X25519".to_string(),
-                        OKPCurve::X448 => "X448".to_string(),
-                        OKPCurve::Ed25519 => "Ed25519".to_string(),
-                        OKPCurve::Ed448 => "Ed448".to_string(),
-                    },
-                    public_key: ssi_jwk::Base64urlUInt(x),
-                    private_key: None,
-                }),
-                public_key_use: None,
-                key_operations: None,
-                algorithm: None,
-                key_id: None,
-                x509_url: None,
-                x509_certificate_chain: None,
-                x509_thumbprint_sha1: None,
-                x509_thumbprint_sha256: None,
-            },
-        })
-    }
-}
-
-impl TryFrom<&ssi_jwk::OctetParams> for OKPCurve {
-    type Error = Error;
-
-    fn try_from(params: &ssi_jwk::OctetParams) -> Result<Self, Self::Error> {
-        match params.curve.as_str() {
-            "Ed25519" => Ok(Self::Ed25519),
-            "Ed448" => Ok(Self::Ed448),
-            "X25519" => Ok(Self::X25519),
-            "X448" => Ok(Self::X448),
-            _ => Err(Error::UnsupportedCurve),
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use hex::FromHex;
@@ -467,5 +337,32 @@ mod test {
             key_bytes,
             "cbor encoding roundtrip failed"
         );
+    }
+
+    #[test]
+    fn malformed_p256_coordinates_return_error_without_panicking() {
+        let malformed = CoseKey::EC2 {
+            crv: EC2Curve::P256,
+            x: vec![1; 31],
+            y: EC2Y::Value(vec![2; 32]),
+        };
+
+        assert_eq!(
+            EncodedPoint::try_from(malformed).unwrap_err().to_string(),
+            Error::InvalidCoseKey.to_string()
+        );
+    }
+
+    #[test]
+    fn okp_key_is_not_reinterpreted_as_a_p256_point() {
+        let okp = CoseKey::OKP {
+            crv: OKPCurve::Ed25519,
+            x: vec![7; 32],
+        };
+
+        assert!(matches!(
+            EncodedPoint::try_from(okp),
+            Err(Error::InvalidCoseKey)
+        ));
     }
 }

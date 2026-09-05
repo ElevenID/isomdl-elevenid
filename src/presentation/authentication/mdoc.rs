@@ -1,6 +1,7 @@
 use crate::cbor;
 use crate::cose;
 use crate::cose::sign1::VerificationResult;
+use crate::definitions::device_key::cose_key::CoseKey;
 use crate::definitions::device_response::Document;
 use crate::definitions::issuer_signed;
 use crate::definitions::session::SessionTranscript;
@@ -10,12 +11,11 @@ use crate::definitions::Mso;
 use crate::definitions::{device_signed::DeviceAuthentication, helpers::Tag24};
 use crate::presentation::reader::Error;
 use anyhow::Result;
+#[cfg(test)]
 use elliptic_curve::generic_array::GenericArray;
 use issuer_signed::IssuerSigned;
 use p256::ecdsa::Signature;
 use p256::ecdsa::VerifyingKey;
-use ssi_jwk::Params;
-use ssi_jwk::JWK as SsiJwk;
 
 pub fn issuer_authentication(x5chain: X5Chain, issuer_signed: &IssuerSigned) -> Result<(), Error> {
     let signer_key = x5chain
@@ -74,22 +74,10 @@ fn verify_device_authentication_payload(
         .as_ref()
         .ok_or(Error::DetachedIssuerAuth)?;
     let mso: Tag24<Mso> = cbor::from_slice(mso_bytes).map_err(|_| Error::MSOParsing)?;
-    let device_key = mso.into_inner().device_key_info.device_key;
-    let jwk = SsiJwk::try_from(device_key)?;
-    match jwk.params {
-        Params::EC(p) => {
-            let x_coordinate = p.x_coordinate.clone();
-            let y_coordinate = p.y_coordinate.clone();
-            let (Some(x), Some(y)) = (x_coordinate, y_coordinate) else {
-                return Err(Error::MdocAuth(
-                    "device key jwk is missing coordinates".to_string(),
-                ));
-            };
-            let encoded_point = p256::EncodedPoint::from_affine_coordinates(
-                GenericArray::from_slice(x.0.as_slice()),
-                GenericArray::from_slice(y.0.as_slice()),
-                false,
-            );
+    let device_key: CoseKey = mso.into_inner().device_key_info.device_key;
+    match device_key {
+        key @ CoseKey::EC2 { .. } => {
+            let encoded_point = p256::EncodedPoint::try_from(key)?;
             let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)?;
             let device_auth: &DeviceAuth = &document.device_signed.device_auth;
 
