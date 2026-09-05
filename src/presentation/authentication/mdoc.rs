@@ -9,7 +9,7 @@ use crate::definitions::x509::X5Chain;
 use crate::definitions::DeviceAuth;
 use crate::definitions::Mso;
 use crate::definitions::{device_signed::DeviceAuthentication, helpers::Tag24};
-use crate::presentation::reader::Error;
+use crate::presentation::authentication::Error;
 use anyhow::Result;
 #[cfg(test)]
 use elliptic_curve::generic_array::GenericArray;

@@ -238,6 +238,7 @@ pub mod definitions;
 pub mod digest_executor;
 #[cfg(feature = "issuer-planning")]
 pub mod issuance;
+#[cfg(feature = "presentation-verifier")]
 pub mod presentation;
 #[cfg(all(
     feature = "issuer-planning",
