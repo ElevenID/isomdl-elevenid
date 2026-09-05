@@ -31,6 +31,14 @@ ElevenID keeps local changes small and reviewable:
 6. Expose caller-ordered, cross-credential mdoc preparation with explicit
    credential identities and the scalar executor as the public batch default.
 
+The first change is an intentional breaking API change for this git-pinned
+fork. It removes the public `TryFrom<ssi_jwk::JWK> for CoseKey`,
+`TryFrom<CoseKey> for ssi_jwk::JWK`, and related `ssi_jwk` parameter conversion
+implementations. Consumers must pass or decode `CoseKey` directly and perform
+any general-purpose JWK conversion outside this crate. Marty consumers pin the
+reviewed revision explicitly so this migration cannot arrive through a loose
+semver update.
+
 The third correction is covered by an ElevenID-owned regression harness using
 the observed OIDF Multipaz interoperability vector. The harness is not
 represented as an official OIDF test, and no imported compliance-suite source,
