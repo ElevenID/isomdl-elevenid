@@ -443,6 +443,114 @@ impl DigestExecutor for NativeParallelDigestExecutor {
     }
 }
 
+/// Minimum job count qualified for adaptive native digest execution.
+///
+/// This is a measured performance threshold, not a resource-safety limit.
+#[cfg(feature = "parallel")]
+pub const ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS: usize = 512;
+
+/// Minimum aggregate input bytes qualified for adaptive native execution.
+///
+/// Requiring both this byte threshold and [`ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS`]
+/// keeps inexpensive uniform workloads on the scalar oracle.
+#[cfg(feature = "parallel")]
+pub const ADAPTIVE_PARALLEL_MIN_INPUT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Per-call worker cap used by the measured adaptive policy.
+#[cfg(feature = "parallel")]
+pub const ADAPTIVE_PARALLEL_MAX_WORKERS: usize = 4;
+
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdaptiveDigestExecutionMode {
+    Serial,
+    NativeParallel { worker_count: usize },
+}
+
+/// Conservative measured selector for bounded native digest execution.
+///
+/// Calls remain serial unless they meet the qualified job and byte floors,
+/// have at least two available workers, and distribute aggregate input bytes
+/// across the executor's contiguous chunks without any chunk holding more
+/// than half of the work. Native execution remains subject to the process-wide
+/// non-blocking worker budget and falls back to the scalar oracle on contention.
+/// WebAssembly always uses the scalar oracle.
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AdaptiveDigestExecutor;
+
+#[cfg(feature = "parallel")]
+impl DigestExecutor for AdaptiveDigestExecutor {
+    fn execute(&self, jobs: &[DigestJob]) -> Result<Vec<DigestResult>, DigestExecutionError> {
+        #[cfg(target_family = "wasm")]
+        {
+            SerialDigestExecutor.execute(jobs)
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            match select_adaptive_digest_execution_mode(jobs, || {
+                std::thread::available_parallelism()
+                    .map(NonZeroUsize::get)
+                    .unwrap_or(1)
+            }) {
+                AdaptiveDigestExecutionMode::Serial => SerialDigestExecutor.execute(jobs),
+                AdaptiveDigestExecutionMode::NativeParallel { worker_count } => {
+                    NativeParallelDigestExecutor::new(
+                        NonZeroUsize::new(worker_count)
+                            .expect("adaptive native worker count is non-zero"),
+                    )
+                    .execute(jobs)
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn select_adaptive_digest_execution_mode<F>(
+    jobs: &[DigestJob],
+    available_parallelism: F,
+) -> AdaptiveDigestExecutionMode
+where
+    F: FnOnce() -> usize,
+{
+    if jobs.len() < ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS {
+        return AdaptiveDigestExecutionMode::Serial;
+    }
+
+    let total_input_bytes = jobs.iter().fold(0_u128, |total, job| {
+        total.saturating_add(job.input.len() as u128)
+    });
+    if total_input_bytes < ADAPTIVE_PARALLEL_MIN_INPUT_BYTES as u128 {
+        return AdaptiveDigestExecutionMode::Serial;
+    }
+
+    let worker_count = available_parallelism()
+        .min(ADAPTIVE_PARALLEL_MAX_WORKERS)
+        .min(jobs.len());
+    if worker_count < 2 {
+        return AdaptiveDigestExecutionMode::Serial;
+    }
+
+    let chunk_size = static_chunk_size(jobs.len(), worker_count);
+    let largest_chunk_bytes = jobs
+        .chunks(chunk_size)
+        .map(|chunk| {
+            chunk.iter().fold(0_u128, |total, job| {
+                total.saturating_add(job.input.len() as u128)
+            })
+        })
+        .max()
+        .unwrap_or(0);
+    let half_total_rounded_up = total_input_bytes / 2 + total_input_bytes % 2;
+    if largest_chunk_bytes > half_total_rounded_up {
+        return AdaptiveDigestExecutionMode::Serial;
+    }
+
+    AdaptiveDigestExecutionMode::NativeParallel { worker_count }
+}
+
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 impl NativeParallelDigestExecutor {
     fn execute_with_pool(
@@ -635,6 +743,28 @@ mod tests {
     }
 
     #[cfg(feature = "parallel")]
+    fn adaptive_digest_jobs(
+        job_count: usize,
+        input_length: impl Fn(usize) -> usize,
+    ) -> Vec<DigestJob> {
+        const ALGORITHMS: [DigestAlgorithm; 3] = [
+            DigestAlgorithm::SHA256,
+            DigestAlgorithm::SHA384,
+            DigestAlgorithm::SHA512,
+        ];
+
+        (0..job_count)
+            .map(|ordinal| DigestJob {
+                credential_id: 41,
+                job_id: 30_000 + ordinal as u64,
+                ordinal,
+                algorithm: ALGORITHMS[ordinal % ALGORITHMS.len()],
+                input: vec![(ordinal % 251) as u8; input_length(ordinal)],
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "parallel")]
     fn sorted_results(mut results: Vec<DigestResult>) -> Vec<DigestResult> {
         results.sort_by_key(|result| (result.credential_id, result.job_id, result.ordinal));
         results
@@ -724,6 +854,97 @@ mod tests {
                 assert_eq!(jobs, original_jobs, "executor mutated its input jobs");
             }
         }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn adaptive_executor_matches_serial_without_mutating_qualified_jobs() {
+        let input_bytes = ADAPTIVE_PARALLEL_MIN_INPUT_BYTES / ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS;
+        let jobs = adaptive_digest_jobs(ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS, |_| input_bytes);
+        let original_jobs = jobs.clone();
+
+        assert_eq!(
+            AdaptiveDigestExecutor.execute(&jobs).unwrap(),
+            SerialDigestExecutor.execute(&jobs).unwrap()
+        );
+        assert_eq!(jobs, original_jobs);
+        assert_eq!(
+            format!("{AdaptiveDigestExecutor:?}"),
+            "AdaptiveDigestExecutor"
+        );
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    #[test]
+    fn adaptive_policy_uses_qualified_count_bytes_balance_and_worker_cap() {
+        use std::cell::Cell;
+
+        let thread_queries = Cell::new(0);
+        let select = |jobs: &[DigestJob], threads| {
+            select_adaptive_digest_execution_mode(jobs, || {
+                thread_queries.set(thread_queries.get() + 1);
+                threads
+            })
+        };
+
+        let bytes_per_job = ADAPTIVE_PARALLEL_MIN_INPUT_BYTES / ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS;
+        assert_eq!(bytes_per_job * ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS, 2_097_152);
+
+        let below_count =
+            adaptive_digest_jobs(ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS - 1, |_| bytes_per_job * 2);
+        assert_eq!(
+            select(&below_count, ADAPTIVE_PARALLEL_MAX_WORKERS),
+            AdaptiveDigestExecutionMode::Serial
+        );
+        assert_eq!(thread_queries.get(), 0);
+
+        let below_bytes =
+            adaptive_digest_jobs(ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS, |_| bytes_per_job - 1);
+        assert_eq!(
+            select(&below_bytes, ADAPTIVE_PARALLEL_MAX_WORKERS),
+            AdaptiveDigestExecutionMode::Serial
+        );
+        assert_eq!(thread_queries.get(), 0);
+
+        const REGRESSING_PROFILE_LENGTHS: [usize; 5] = [16, 64, 256, 1_024, 4_096];
+        let regressing_profile =
+            adaptive_digest_jobs(ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS, |ordinal| {
+                REGRESSING_PROFILE_LENGTHS[ordinal % REGRESSING_PROFILE_LENGTHS.len()]
+            });
+        assert_eq!(
+            select(&regressing_profile, ADAPTIVE_PARALLEL_MAX_WORKERS),
+            AdaptiveDigestExecutionMode::Serial
+        );
+
+        let at_thresholds =
+            adaptive_digest_jobs(ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS, |_| bytes_per_job);
+        assert_eq!(
+            select(&at_thresholds, 1),
+            AdaptiveDigestExecutionMode::Serial
+        );
+        assert_eq!(
+            select(&at_thresholds, 2),
+            AdaptiveDigestExecutionMode::NativeParallel { worker_count: 2 }
+        );
+        assert_eq!(
+            select(&at_thresholds, usize::MAX),
+            AdaptiveDigestExecutionMode::NativeParallel {
+                worker_count: ADAPTIVE_PARALLEL_MAX_WORKERS
+            }
+        );
+
+        let mut imbalanced = adaptive_digest_jobs(ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS, |_| 0);
+        let chunk_size = static_chunk_size(
+            ADAPTIVE_PARALLEL_MIN_DIGEST_JOBS,
+            ADAPTIVE_PARALLEL_MAX_WORKERS,
+        );
+        for job in &mut imbalanced[..chunk_size] {
+            job.input = vec![0; bytes_per_job * ADAPTIVE_PARALLEL_MAX_WORKERS];
+        }
+        assert_eq!(
+            select(&imbalanced, ADAPTIVE_PARALLEL_MAX_WORKERS),
+            AdaptiveDigestExecutionMode::Serial
+        );
     }
 
     #[cfg(feature = "parallel")]
