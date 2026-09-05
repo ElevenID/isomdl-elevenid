@@ -339,10 +339,11 @@ fn native_digest_pool() -> Option<&'static NativeDigestPool> {
 /// retains its process-abort semantics. On WebAssembly it uses the exact
 /// serial oracle because native threads are not assumed to be available.
 ///
-/// This executor is deliberately not used by `Mdoc::prepare` or
-/// `Builder::prepare`. Callers must opt in through the existing
-/// `prepare_with_digest_executor` boundary and keep the executor inside the
-/// issuer's trusted process.
+/// Direct use remains caller-selected through the existing
+/// `prepare_with_digest_executor` boundary. When `parallel` is enabled, the
+/// ordinary preparation entry points may delegate to this executor indirectly
+/// after [`AdaptiveDigestExecutor`] qualifies the workload. Keep explicit
+/// executors inside the issuer's trusted process.
 #[cfg(feature = "parallel")]
 #[derive(Clone, Copy)]
 pub struct NativeParallelDigestExecutor {
@@ -503,6 +504,28 @@ impl DigestExecutor for AdaptiveDigestExecutor {
                     .execute(jobs)
                 }
             }
+        }
+    }
+}
+
+/// Executor used by the ordinary mdoc preparation entry points.
+///
+/// Builds without `parallel` retain the exact scalar oracle. Builds that opt
+/// into `parallel` use the conservative adaptive policy; callers can still
+/// select an explicit executor through the existing preparation APIs.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DefaultDigestExecutor;
+
+impl DigestExecutor for DefaultDigestExecutor {
+    fn execute(&self, jobs: &[DigestJob]) -> Result<Vec<DigestResult>, DigestExecutionError> {
+        #[cfg(feature = "parallel")]
+        {
+            AdaptiveDigestExecutor.execute(jobs)
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            SerialDigestExecutor.execute(jobs)
         }
     }
 }
@@ -688,6 +711,26 @@ mod tests {
     #[test]
     fn serial_executor_accepts_an_empty_batch() {
         assert!(SerialDigestExecutor.execute(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn default_executor_preserves_scalar_results() {
+        let jobs = [DigestJob {
+            credential_id: 19,
+            job_id: 23,
+            ordinal: 0,
+            algorithm: DigestAlgorithm::SHA256,
+            input: b"default route behavior lock".to_vec(),
+        }];
+
+        assert_eq!(
+            DefaultDigestExecutor.execute(&jobs).unwrap(),
+            SerialDigestExecutor.execute(&jobs).unwrap()
+        );
+        assert_eq!(
+            format!("{DefaultDigestExecutor:?}"),
+            "DefaultDigestExecutor"
+        );
     }
 
     #[test]

@@ -13,8 +13,10 @@ use signature::{SignatureEncoding, Signer};
 
 use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::{MaybeTagged, SignatureAlgorithm};
+#[cfg(test)]
+use crate::digest_executor::SerialDigestExecutor;
 use crate::digest_executor::{
-    digest_length, DigestExecutor, DigestJob, DigestResult, SerialDigestExecutor,
+    digest_length, DefaultDigestExecutor, DigestExecutor, DigestJob, DigestResult,
 };
 use crate::{
     definitions::x509::x5chain::{X5Chain, X5CHAIN_COSE_HEADER_LABEL},
@@ -172,6 +174,9 @@ impl Mdoc {
     }
 
     /// Prepare mdoc for remote signing.
+    ///
+    /// Builds without `parallel` use the scalar digest oracle. Builds with the
+    /// feature use the bounded adaptive native policy for qualified workloads.
     pub fn prepare(
         doc_type: String,
         namespaces: Namespaces,
@@ -189,7 +194,7 @@ impl Mdoc {
             device_key_info,
             signature_algorithm,
             enable_decoy_digests,
-            &SerialDigestExecutor,
+            &DefaultDigestExecutor,
         )
     }
 
@@ -235,18 +240,19 @@ impl Mdoc {
 
     /// Prepare a caller-ordered batch of mdocs for remote signing.
     ///
-    /// The scalar [`SerialDigestExecutor`] is the normative default. All batch
-    /// inputs are validated before randomness is allocated. Randomness is then
-    /// consumed strictly in caller order, all digest jobs are submitted once,
-    /// and results are restored by `(credential_id, job_id)` before any
-    /// prepared value is returned. An empty batch returns an empty vector
-    /// without invoking an executor.
+    /// Without the `parallel` feature, the scalar
+    /// [`SerialDigestExecutor`](crate::digest_executor::SerialDigestExecutor)
+    /// is the exact default. Feature-enabled builds use the conservative
+    /// adaptive native policy. All batch inputs are validated before randomness
+    /// is allocated. Randomness is then consumed strictly in caller order, all
+    /// digest jobs are submitted once, and results are restored by
+    /// `(credential_id, job_id)` before any prepared value is returned. An
+    /// empty batch returns an empty vector without invoking an executor.
     ///
     /// This operation only prepares existing COSE signature payloads. It does
-    /// not sign, issue, activate, or change the default route of any existing
-    /// single-credential entry point. Any error discards the entire batch.
+    /// not sign, issue, or activate. Any error discards the entire batch.
     pub fn prepare_batch(batch: Vec<MdocBatchItem>) -> Result<Vec<PreparedMdocBatchItem>> {
-        Self::prepare_batch_with_digest_executor(batch, &SerialDigestExecutor)
+        Self::prepare_batch_with_digest_executor(batch, &DefaultDigestExecutor)
     }
 
     /// Prepare a caller-ordered batch with one caller-selected digest executor.
@@ -261,7 +267,7 @@ impl Mdoc {
     ///
     /// Validation, planning, execution, restoration, and preparation are
     /// all-or-nothing: no [`PreparedMdocBatchItem`] is returned on any error.
-    /// This method does not sign, issue, activate, or alter default routing.
+    /// This method does not sign, issue, or activate.
     pub fn prepare_batch_with_digest_executor<E>(
         batch: Vec<MdocBatchItem>,
         digest_executor: &E,
@@ -597,8 +603,10 @@ impl Builder {
     ///
     /// The signature algorithm which the mdoc will be signed with must be known ahead of time as
     /// it is a required field in the signature headers.
+    /// Builds with `parallel` use the bounded adaptive digest policy for
+    /// qualified workloads; other builds use the exact scalar oracle.
     pub fn prepare(self, signature_algorithm: Algorithm) -> Result<PreparedMdoc> {
-        self.prepare_with_digest_executor(signature_algorithm, &SerialDigestExecutor)
+        self.prepare_with_digest_executor(signature_algorithm, &DefaultDigestExecutor)
     }
 
     /// Prepare an mdoc with a caller-selected digest executor.
@@ -2439,7 +2447,6 @@ pub mod test {
         Ok(())
     }
 
-    #[cfg(any(feature = "parallel", feature = "simd"))]
     fn assert_executor_preserves_fixed_randomness_mdoc_bytes<E>(executor: &E) -> anyhow::Result<()>
     where
         E: DigestExecutor,
@@ -2500,6 +2507,11 @@ pub mod test {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn default_executor_preserves_fixed_randomness_mdoc_bytes() -> anyhow::Result<()> {
+        assert_executor_preserves_fixed_randomness_mdoc_bytes(&DefaultDigestExecutor)
     }
 
     #[cfg(feature = "parallel")]
