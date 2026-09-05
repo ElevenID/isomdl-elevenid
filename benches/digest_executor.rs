@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use isomdl::definitions::DigestAlgorithm;
-#[cfg(feature = "parallel")]
-use isomdl::digest_executor::NativeParallelDigestExecutor;
 #[cfg(feature = "simd")]
 use isomdl::digest_executor::SimdDigestExecutor;
+#[cfg(feature = "parallel")]
+use isomdl::digest_executor::{AdaptiveDigestExecutor, NativeParallelDigestExecutor};
 use isomdl::digest_executor::{DigestExecutor, DigestJob, DigestResult, SerialDigestExecutor};
 
 const JOB_COUNTS: [usize; 5] = [1, 8, 32, 128, 512];
@@ -19,6 +19,8 @@ const JOB_COUNTS: [usize; 5] = [1, 8, 32, 128, 512];
 enum InputProfile {
     Mixed,
     Uniform256,
+    Uniform1024,
+    Uniform4096,
 }
 
 fn digest_jobs(
@@ -33,6 +35,8 @@ fn digest_jobs(
             let input_length = match profile {
                 InputProfile::Mixed => INPUT_LENGTHS[ordinal % INPUT_LENGTHS.len()],
                 InputProfile::Uniform256 => 256,
+                InputProfile::Uniform1024 => 1_024,
+                InputProfile::Uniform4096 => 4_096,
             };
             DigestJob {
                 credential_id: 0,
@@ -79,8 +83,28 @@ where
             DigestAlgorithm::SHA256,
             InputProfile::Uniform256,
         ),
+        (
+            "sha256-uniform-1024",
+            DigestAlgorithm::SHA256,
+            InputProfile::Uniform1024,
+        ),
+        (
+            "sha256-uniform-4096",
+            DigestAlgorithm::SHA256,
+            InputProfile::Uniform4096,
+        ),
         ("sha384", DigestAlgorithm::SHA384, InputProfile::Mixed),
+        (
+            "sha384-uniform-4096",
+            DigestAlgorithm::SHA384,
+            InputProfile::Uniform4096,
+        ),
         ("sha512", DigestAlgorithm::SHA512, InputProfile::Mixed),
+        (
+            "sha512-uniform-4096",
+            DigestAlgorithm::SHA512,
+            InputProfile::Uniform4096,
+        ),
     ] {
         for job_count in JOB_COUNTS {
             let jobs = digest_jobs(job_count, algorithm, profile);
@@ -155,6 +179,11 @@ fn benchmark_digest_executor(criterion: &mut Criterion) {
             criterion,
             "digest_executor/native-up-to-4-workers",
             &NativeParallelDigestExecutor::new(requested_workers),
+        );
+        benchmark_executor(
+            criterion,
+            "digest_executor/adaptive",
+            &AdaptiveDigestExecutor,
         );
     }
 
