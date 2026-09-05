@@ -262,7 +262,7 @@ mod p384 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "issuer-local-signing"))]
 mod tests {
     use crate::cbor;
     use crate::cose::sign1::{CoseSign1, Error, PreparedCoseSign1};

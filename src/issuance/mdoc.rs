@@ -17,7 +17,7 @@ use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::MaybeTagged;
 #[cfg(feature = "issuer-local-signing")]
 use crate::cose::SignatureAlgorithm;
-#[cfg(test)]
+#[cfg(all(test, feature = "issuer-local-signing"))]
 use crate::digest_executor::SerialDigestExecutor;
 use crate::digest_executor::{
     digest_length, DefaultDigestExecutor, DigestExecutor, DigestJob, DigestResult,
@@ -1238,7 +1238,7 @@ where
     digest_id
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "issuer-local-signing"))]
 pub mod test {
     use elliptic_curve::sec1::ToEncodedPoint;
     use p256::ecdsa::{Signature, SigningKey};
@@ -3223,5 +3223,27 @@ pub mod test {
                 .values()
                 .fold(0, |acc, x| acc + x.len()),
         );
+    }
+}
+
+#[cfg(all(test, feature = "issuer-planning"))]
+mod issuer_planning_tests {
+    use super::{validate_remote_signature, Algorithm};
+
+    #[test]
+    fn remote_signature_validation_covers_all_supported_curves() {
+        for (algorithm, width) in [
+            (Algorithm::ES256, 64),
+            (Algorithm::ES384, 96),
+            (Algorithm::ES512, 132),
+        ] {
+            let mut valid = vec![0u8; width];
+            valid[width / 2 - 1] = 1;
+            valid[width - 1] = 1;
+            assert!(validate_remote_signature(algorithm, &valid).is_ok());
+            assert!(validate_remote_signature(algorithm, &vec![0u8; width]).is_err());
+            assert!(validate_remote_signature(algorithm, &vec![0xffu8; width]).is_err());
+        }
+        assert!(validate_remote_signature(Algorithm::EdDSA, &[1u8; 64]).is_err());
     }
 }
