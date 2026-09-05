@@ -496,7 +496,7 @@ impl Mdoc {
             .map_err(|e| anyhow!("error signing cosesign1: {}", e))?
             .to_vec();
 
-        Ok(prepared_mdoc.complete(x5chain, signature))
+        prepared_mdoc.complete(x5chain, signature)
     }
 
     /// Directly sign and issue an mdoc.
@@ -533,7 +533,7 @@ impl Mdoc {
             .map_err(|e| anyhow!("error signing cosesign1: {}", e))?
             .to_vec();
 
-        Ok(prepared_mdoc.complete(x5chain, signature))
+        prepared_mdoc.complete(x5chain, signature)
     }
 }
 
@@ -545,7 +545,12 @@ impl PreparedMdoc {
 
     /// Supply the remotely signed signature and x5chain containing the issuing certificate
     /// to complete and issue the prepared mdoc.
-    pub fn complete(self, x5chain: X5Chain, signature: Vec<u8>) -> Mdoc {
+    pub fn complete(self, x5chain: X5Chain, signature: Vec<u8>) -> Result<Mdoc> {
+        let algorithm = self
+            .prepared_sig
+            .algorithm()
+            .ok_or_else(|| anyhow!("prepared mdoc is missing a protected signature algorithm"))?;
+        validate_remote_signature(algorithm, &signature)?;
         let PreparedMdoc {
             doc_type,
             namespaces,
@@ -559,13 +564,33 @@ impl PreparedMdoc {
             .unprotected
             .rest
             .push((Label::Int(X5CHAIN_COSE_HEADER_LABEL), x5chain.into_cbor()));
-        Mdoc {
+        Ok(Mdoc {
             doc_type,
             mso,
             namespaces,
             issuer_auth,
-        }
+        })
     }
+}
+
+fn validate_remote_signature(algorithm: Algorithm, signature: &[u8]) -> Result<()> {
+    let expected_len = match algorithm {
+        Algorithm::ES256 => 64,
+        Algorithm::ES384 => 96,
+        Algorithm::ES512 => 132,
+        _ => {
+            return Err(anyhow!(
+                "unsupported remote mdoc signing algorithm: {algorithm:?}"
+            ))
+        }
+    };
+    if signature.len() != expected_len {
+        return Err(anyhow!(
+            "invalid {algorithm:?} signature length: expected {expected_len} bytes, got {}",
+            signature.len()
+        ));
+    }
+    Ok(())
 }
 
 impl Builder {
@@ -1491,6 +1516,31 @@ pub mod test {
             error.to_string(),
             "at least one element required in each namespace"
         );
+    }
+
+    #[test]
+    fn remote_completion_rejects_malformed_es256_signatures() {
+        let chain = || {
+            X5Chain::builder()
+                .with_pem_certificate(ISSUER_CERT)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let prepare = || {
+            minimal_test_mdoc_builder()
+                .prepare(Algorithm::ES256)
+                .unwrap()
+        };
+
+        assert!(prepare().complete(chain(), vec![]).is_err());
+        assert!(prepare().complete(chain(), vec![0; 63]).is_err());
+
+        let mut der_encoded = vec![0; 70];
+        der_encoded[0] = 0x30;
+        assert!(prepare().complete(chain(), der_encoded).is_err());
+
+        assert!(prepare().complete(chain(), vec![0; 64]).is_ok());
     }
 
     pub fn minimal_test_mdoc() -> anyhow::Result<Mdoc> {

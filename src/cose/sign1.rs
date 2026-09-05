@@ -138,6 +138,14 @@ impl PreparedCoseSign1 {
         &self.signature_payload
     }
 
+    /// Returns the protected signature algorithm, when it is an assigned IANA value.
+    pub fn algorithm(&self) -> Option<coset::iana::Algorithm> {
+        match self.cose_sign1.inner.protected.header.alg.as_ref() {
+            Some(RegisteredLabelWithPrivate::Assigned(algorithm)) => Some(*algorithm),
+            _ => None,
+        }
+    }
+
     /// Finalize the COSE_Sign1 by adding the signature.
     pub fn finalize(self, signature: Vec<u8>) -> MaybeTagged<CoseSign1> {
         let mut cose_sign1 = self.cose_sign1;
