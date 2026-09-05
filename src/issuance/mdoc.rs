@@ -574,19 +574,19 @@ impl PreparedMdoc {
 }
 
 fn validate_remote_signature(algorithm: Algorithm, signature: &[u8]) -> Result<()> {
-    let expected_len = match algorithm {
-        Algorithm::ES256 => 64,
-        Algorithm::ES384 => 96,
-        Algorithm::ES512 => 132,
+    let valid = match algorithm {
+        Algorithm::ES256 => p256::ecdsa::Signature::from_slice(signature).is_ok(),
+        Algorithm::ES384 => p384::ecdsa::Signature::from_slice(signature).is_ok(),
+        Algorithm::ES512 => p521::ecdsa::Signature::from_slice(signature).is_ok(),
         _ => {
             return Err(anyhow!(
                 "unsupported remote mdoc signing algorithm: {algorithm:?}"
             ))
         }
     };
-    if signature.len() != expected_len {
+    if !valid {
         return Err(anyhow!(
-            "invalid {algorithm:?} signature length: expected {expected_len} bytes, got {}",
+            "invalid {algorithm:?} remote signature encoding: got {} bytes",
             signature.len()
         ));
     }
@@ -1540,7 +1540,26 @@ pub mod test {
         der_encoded[0] = 0x30;
         assert!(prepare().complete(chain(), der_encoded).is_err());
 
-        assert!(prepare().complete(chain(), vec![0; 64]).is_ok());
+        assert!(prepare().complete(chain(), vec![0; 64]).is_err());
+        assert!(prepare().complete(chain(), vec![0xff; 64]).is_err());
+
+        let mut valid = vec![0; 64];
+        valid[31] = 1;
+        valid[63] = 1;
+        assert!(prepare().complete(chain(), valid).is_ok());
+    }
+
+    #[test]
+    fn remote_signature_validation_covers_all_supported_curves() {
+        for (algorithm, width) in [(Algorithm::ES384, 96), (Algorithm::ES512, 132)] {
+            let mut valid = vec![0u8; width];
+            valid[width / 2 - 1] = 1;
+            valid[width - 1] = 1;
+            assert!(validate_remote_signature(algorithm, &valid).is_ok());
+            assert!(validate_remote_signature(algorithm, &vec![0u8; width]).is_err());
+            assert!(validate_remote_signature(algorithm, &vec![0xffu8; width]).is_err());
+        }
+        assert!(validate_remote_signature(Algorithm::EdDSA, &[1u8; 64]).is_err());
     }
 
     pub fn minimal_test_mdoc() -> anyhow::Result<Mdoc> {
