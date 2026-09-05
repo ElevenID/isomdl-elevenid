@@ -9,8 +9,9 @@ official SpruceID release.
 
 ElevenID keeps local changes small and reviewable:
 
-1. Replace `ssi-jwk 0.2.1` and its `rsa 0.6.1` graph with the current,
-   narrowly featured `ssi-jwk` release.
+1. Remove the direct `ssi-jwk`/linked-data conversion path and its transitive
+   RSA graph. Device keys are validated directly from COSE as exact P-256
+   coordinates, including strict coordinate lengths and curve/key-type checks.
 2. Normalize an explicitly empty optional `issuerSigned.nameSpaces` map to no
    disclosed issuer-signed items. Non-empty namespace maps remain strict. This
    is required for the representation emitted by the official OIDF wallet
