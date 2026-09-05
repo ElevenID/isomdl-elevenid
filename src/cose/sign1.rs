@@ -21,15 +21,8 @@ use crate::cose::{MaybeTagged, SignatureAlgorithm};
 /// Example:
 /// ```
 /// use coset::iana;
-/// use hex::FromHex;
-/// use p256::ecdsa::{Signature, SigningKey};
-/// use p256::SecretKey;
-/// use signature::{SignatureEncoding, Signer, SignerMut};
-/// use isomdl::cose::sign1::{Error, PreparedCoseSign1};
-/// use isomdl::cose::SignatureAlgorithm;
+/// use isomdl::cose::sign1::PreparedCoseSign1;
 ///
-/// let key = Vec::<u8>::from_hex("57c92077664146e876760c9520d054aa93c3afb04e306705db6090308507b4d3").unwrap();
-/// let signer: SigningKey = SecretKey::from_slice(&key).unwrap().into();
 /// let protected = coset::HeaderBuilder::new()
 ///     .algorithm(iana::Algorithm::ES256)
 ///     .build();
@@ -40,18 +33,10 @@ use crate::cose::{MaybeTagged, SignatureAlgorithm};
 ///     .payload(b"This is the content.".to_vec());
 /// let prepared = PreparedCoseSign1::new(builder, None, None, true).unwrap();
 /// let signature_payload = prepared.signature_payload();
-/// let signature = sign::<SigningKey, Signature>(signature_payload, &signer).unwrap();
+/// // Send `signature_payload` to the configured remote signer. The returned
+/// // signature is supplied here as fixed example data.
+/// let signature = vec![0; 64];
 /// let cose_sign1 = prepared.finalize(signature);
-///
-/// fn sign<S, Sig>(signature_payload: &[u8], s: &S) -> anyhow::Result<Vec<u8>>
-/// where
-///     S: Signer<Sig> + SignatureAlgorithm,
-///     Sig: SignatureEncoding,
-/// {
-///     Ok(s.try_sign(signature_payload)
-///         .map_err(Error::Signing)?
-///         .to_vec())
-/// }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedCoseSign1 {
     cose_sign1: MaybeTagged<CoseSign1>,
@@ -227,10 +212,13 @@ impl MaybeTagged<CoseSign1> {
 
 mod p256 {
     use coset::iana;
-    use p256::ecdsa::{SigningKey, VerifyingKey};
+    #[cfg(feature = "issuer-local-signing")]
+    use p256::ecdsa::SigningKey;
+    use p256::ecdsa::VerifyingKey;
 
     use crate::cose::SignatureAlgorithm;
 
+    #[cfg(feature = "issuer-local-signing")]
     impl SignatureAlgorithm for SigningKey {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES256
@@ -246,10 +234,13 @@ mod p256 {
 
 mod p384 {
     use coset::iana;
-    use p384::ecdsa::{SigningKey, VerifyingKey};
+    #[cfg(feature = "issuer-local-signing")]
+    use p384::ecdsa::SigningKey;
+    use p384::ecdsa::VerifyingKey;
 
     use crate::cose::SignatureAlgorithm;
 
+    #[cfg(feature = "issuer-local-signing")]
     impl SignatureAlgorithm for SigningKey {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES384

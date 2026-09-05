@@ -4,15 +4,19 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "issuer-local-signing")]
 use async_signature::AsyncSigner;
 use coset::iana::Algorithm;
 use coset::{CoseSign1, Label};
 use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "issuer-local-signing")]
 use signature::{SignatureEncoding, Signer};
 
 use crate::cose::sign1::PreparedCoseSign1;
-use crate::cose::{MaybeTagged, SignatureAlgorithm};
+use crate::cose::MaybeTagged;
+#[cfg(feature = "issuer-local-signing")]
+use crate::cose::SignatureAlgorithm;
 #[cfg(test)]
 use crate::digest_executor::SerialDigestExecutor;
 use crate::digest_executor::{
@@ -460,6 +464,7 @@ impl Mdoc {
     }
 
     /// Directly sign and issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     #[allow(clippy::too_many_arguments)]
     pub fn issue<S, Sig>(
         doc_type: String,
@@ -495,6 +500,7 @@ impl Mdoc {
     }
 
     /// Directly sign and issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     #[allow(clippy::too_many_arguments)]
     pub async fn issue_async<S, Sig>(
         doc_type: String,
@@ -651,6 +657,7 @@ impl Builder {
     }
 
     /// Directly issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     pub fn issue<S, Sig>(self, x5chain: X5Chain, signer: S) -> Result<Mdoc>
     where
         S: Signer<Sig> + SignatureAlgorithm,
@@ -686,6 +693,7 @@ impl Builder {
     }
 
     /// Directly issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     pub async fn issue_async<S, Sig>(self, x5chain: X5Chain, signer: S) -> Result<Mdoc>
     where
         S: AsyncSigner<Sig> + SignatureAlgorithm,
