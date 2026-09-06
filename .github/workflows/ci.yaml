@@ -50,6 +50,15 @@ jobs:
       - name: Test remote issuer-planning boundary
         run: cargo test --locked --no-default-features --features issuer-planning --lib
 
+      - name: Guard issuer-planning curve codecs
+        shell: bash
+        run: |
+          planning_tree="$(cargo tree --locked --no-default-features --features issuer-planning -e features,no-dev)"
+          if grep -Eq 'p521 feature "ecdsa"|p(256|384) feature "pem"' <<<"$planning_tree"; then
+            printf '%s\n' "$planning_tree"
+            exit 1
+          fi
+
       - name: Check WebAssembly fallback
         run: cargo check --target wasm32-unknown-unknown --all-features --lib
 
