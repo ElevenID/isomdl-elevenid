@@ -1,6 +1,6 @@
 use crate::cbor;
 use crate::cose;
-use crate::cose::sign1::VerificationResult;
+use crate::cose::sign1::{P256Verifier, VerificationResult};
 use crate::definitions::device_key::cose_key::CoseKey;
 use crate::definitions::device_response::Document;
 use crate::definitions::issuer_signed;
@@ -15,16 +15,16 @@ use anyhow::Result;
 use elliptic_curve::generic_array::GenericArray;
 use issuer_signed::IssuerSigned;
 use p256::ecdsa::Signature;
-use p256::ecdsa::VerifyingKey;
 
 pub fn issuer_authentication(x5chain: X5Chain, issuer_signed: &IssuerSigned) -> Result<(), Error> {
-    let signer_key = x5chain
+    let signer_key: P256Verifier = x5chain
         .end_entity_public_key()
-        .map_err(Error::IssuerPublicKey)?;
+        .map_err(Error::IssuerPublicKey)?
+        .into();
     let verification_result: cose::sign1::VerificationResult =
         issuer_signed
             .issuer_auth
-            .verify::<VerifyingKey, Signature>(&signer_key, None, None);
+            .verify::<P256Verifier, Signature>(&signer_key, None, None);
     verification_result
         .into_result()
         .map_err(Error::IssuerAuthentication)
@@ -78,13 +78,14 @@ fn verify_device_authentication_payload(
     match device_key {
         key @ CoseKey::EC2 { .. } => {
             let encoded_point = p256::EncodedPoint::try_from(key)?;
-            let verifying_key = VerifyingKey::from_encoded_point(&encoded_point)?;
+            let verifying_key = P256Verifier::from_sec1_bytes(encoded_point.as_bytes())
+                .map_err(|e| Error::MdocAuth(e.to_string()))?;
             let device_auth: &DeviceAuth = &document.device_signed.device_auth;
 
             match device_auth {
                 DeviceAuth::DeviceSignature(device_signature) => {
                     let external_aad = None;
-                    let result = device_signature.verify::<VerifyingKey, Signature>(
+                    let result = device_signature.verify::<P256Verifier, Signature>(
                         &verifying_key,
                         Some(cbor_payload),
                         external_aad,
@@ -204,7 +205,7 @@ mod tests {
 
     #[test]
     fn rustcrypto_accepts_multipaz_device_signature() {
-        use p256::ecdsa::signature::Verifier as _;
+        use signature::Verifier as _;
 
         let x = hex::decode("83c9cec471e04ee83e23fd7bfa3bc287a439803c8f57c9798c4cce6bd4d129c5")
             .unwrap();
@@ -215,7 +216,7 @@ mod tests {
             GenericArray::from_slice(&y),
             false,
         );
-        let key = VerifyingKey::from_encoded_point(&point).unwrap();
+        let key = P256Verifier::from_sec1_bytes(point.as_bytes()).unwrap();
         let signature = Signature::from_slice(
             &hex::decode(
                 "8e66dedf4886cdddd75698e30bceeaeb677d7a18a2049d374032264e87f3bb7a\
@@ -246,7 +247,7 @@ mod tests {
             GenericArray::from_slice(&y),
             false,
         );
-        let key = VerifyingKey::from_encoded_point(&point).unwrap();
+        let key = P256Verifier::from_sec1_bytes(point.as_bytes()).unwrap();
         let cose: crate::cose::MaybeTagged<coset::CoseSign1> = cbor::from_slice(
             &hex::decode(
                 "8443a10126a0f658408e66dedf4886cdddd75698e30bceeaeb677d7a18a2049d37\
@@ -264,7 +265,7 @@ mod tests {
         )
         .unwrap();
 
-        cose.verify::<VerifyingKey, Signature>(&key, Some(&payload), None)
+        cose.verify::<P256Verifier, Signature>(&key, Some(&payload), None)
             .into_result()
             .unwrap();
     }
