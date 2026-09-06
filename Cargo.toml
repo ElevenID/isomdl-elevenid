@@ -13,7 +13,12 @@ exclude = ["test/"]
 [features]
 default = ["issuer-planning", "issuer-local-signing", "presentation-verifier", "session-key-agreement", "cli"]
 issuer-planning = ["dep:p521", "dep:rand"]
-issuer-local-signing = ["issuer-planning", "dep:async-signature"]
+issuer-local-signing = [
+    "issuer-planning",
+    "dep:async-signature",
+    "p256/pem",
+    "p384/pem",
+]
 presentation-verifier = []
 session-key-agreement = [
     "presentation-verifier",
@@ -42,9 +47,9 @@ required-features = ["cli"]
 [dependencies]
 anyhow = "1.0"
 ecdsa = { version = "0.16.9", default-features = false, features = ["serde", "verifying"] }
-p256 = { version = "0.13.0", default-features = false, features = ["ecdsa", "pem", "serde", "std"] }
-p384 = { version = "0.13.0", default-features = false, features = ["ecdsa", "pem", "serde", "std"] }
-p521 = { version = "0.13.3", default-features = false, features = ["ecdsa"], optional = true }
+p256 = { version = "0.13.0", default-features = false, features = ["ecdsa", "pkcs8", "serde", "std"] }
+p384 = { version = "0.13.0", default-features = false, features = ["ecdsa", "pkcs8", "serde", "std"] }
+p521 = { version = "0.13.3", default-features = false, features = ["ecdsa-core"], optional = true }
 rand = { version = "0.8.5", features = ["getrandom"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
