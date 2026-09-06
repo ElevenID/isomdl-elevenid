@@ -59,6 +59,18 @@ jobs:
             exit 1
           fi
 
+      - name: Check presentation-verifier boundary
+        run: cargo check --locked --no-default-features --features presentation-verifier
+
+      - name: Guard presentation-verifier curve codecs
+        shell: bash
+        run: |
+          verifier_tree="$(cargo tree --locked --no-default-features --features presentation-verifier -e features,no-dev)"
+          if grep -Eq 'ecdsa feature "signing"|p(256|384|521) feature "ecdsa"|p(256|384) feature "pem"' <<<"$verifier_tree"; then
+            printf '%s\n' "$verifier_tree"
+            exit 1
+          fi
+
       - name: Check WebAssembly fallback
         run: cargo check --target wasm32-unknown-unknown --all-features --lib
 
