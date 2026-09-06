@@ -16,10 +16,12 @@ issuer-planning = ["dep:p521", "dep:rand"]
 issuer-local-signing = [
     "issuer-planning",
     "dep:async-signature",
+    "p256/ecdsa",
     "p256/pem",
+    "p384/ecdsa",
     "p384/pem",
 ]
-presentation-verifier = []
+presentation-verifier = ["p256/ecdsa", "p384/ecdsa"]
 session-key-agreement = [
     "presentation-verifier",
     "dep:aes",
@@ -47,8 +49,8 @@ required-features = ["cli"]
 [dependencies]
 anyhow = "1.0"
 ecdsa = { version = "0.16.9", default-features = false, features = ["serde", "verifying"] }
-p256 = { version = "0.13.0", default-features = false, features = ["ecdsa", "pkcs8", "serde", "std"] }
-p384 = { version = "0.13.0", default-features = false, features = ["ecdsa", "pkcs8", "serde", "std"] }
+p256 = { version = "0.13.0", default-features = false, features = ["arithmetic", "ecdsa-core", "pkcs8", "serde", "std"] }
+p384 = { version = "0.13.0", default-features = false, features = ["ecdsa-core", "pkcs8", "serde", "std"] }
 p521 = { version = "0.13.3", default-features = false, features = ["ecdsa-core"], optional = true }
 rand = { version = "0.8.5", features = ["getrandom"], optional = true }
 serde = { version = "1.0", features = ["derive"] }

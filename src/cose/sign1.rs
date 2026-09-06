@@ -218,10 +218,12 @@ impl MaybeTagged<CoseSign1> {
     }
 }
 
+#[cfg(any(feature = "issuer-local-signing", feature = "presentation-verifier"))]
 mod p256 {
     use coset::iana;
     #[cfg(feature = "issuer-local-signing")]
     use p256::ecdsa::SigningKey;
+    #[cfg(feature = "presentation-verifier")]
     use p256::ecdsa::VerifyingKey;
 
     use crate::cose::SignatureAlgorithm;
@@ -233,6 +235,7 @@ mod p256 {
         }
     }
 
+    #[cfg(feature = "presentation-verifier")]
     impl SignatureAlgorithm for VerifyingKey {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES256
@@ -240,10 +243,12 @@ mod p256 {
     }
 }
 
+#[cfg(any(feature = "issuer-local-signing", feature = "presentation-verifier"))]
 mod p384 {
     use coset::iana;
     #[cfg(feature = "issuer-local-signing")]
     use p384::ecdsa::SigningKey;
+    #[cfg(feature = "presentation-verifier")]
     use p384::ecdsa::VerifyingKey;
 
     use crate::cose::SignatureAlgorithm;
@@ -255,6 +260,7 @@ mod p384 {
         }
     }
 
+    #[cfg(feature = "presentation-verifier")]
     impl SignatureAlgorithm for VerifyingKey {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES384
