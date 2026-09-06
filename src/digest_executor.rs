@@ -461,7 +461,7 @@ pub const ADAPTIVE_PARALLEL_MIN_INPUT_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "parallel")]
 pub const ADAPTIVE_PARALLEL_MAX_WORKERS: usize = 4;
 
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdaptiveDigestExecutionMode {
     Serial,
