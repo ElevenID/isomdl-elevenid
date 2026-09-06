@@ -9,8 +9,9 @@ official SpruceID release.
 
 ElevenID keeps local changes small and reviewable:
 
-1. Replace `ssi-jwk 0.2.1` and its `rsa 0.6.1` graph with the current,
-   narrowly featured `ssi-jwk` release.
+1. Remove the direct `ssi-jwk`/linked-data conversion path and its transitive
+   RSA graph. Device keys are validated directly from COSE as exact P-256
+   coordinates, including strict coordinate lengths and curve/key-type checks.
 2. Normalize an explicitly empty optional `issuerSigned.nameSpaces` map to no
    disclosed issuer-signed items. Non-empty namespace maps remain strict. This
    is required for the representation emitted by the official OIDF wallet
@@ -29,6 +30,14 @@ ElevenID keeps local changes small and reviewable:
    caller explicitly selects the executor inside the issuer trust boundary.
 6. Expose caller-ordered, cross-credential mdoc preparation with explicit
    credential identities and the scalar executor as the public batch default.
+
+The first change is an intentional breaking API change for this git-pinned
+fork. It removes the public `TryFrom<ssi_jwk::JWK> for CoseKey`,
+`TryFrom<CoseKey> for ssi_jwk::JWK`, and related `ssi_jwk` parameter conversion
+implementations. Consumers must pass or decode `CoseKey` directly and perform
+any general-purpose JWK conversion outside this crate. Marty consumers pin the
+reviewed revision explicitly so this migration cannot arrive through a loose
+semver update.
 
 The third correction is covered by an ElevenID-owned regression harness using
 the observed OIDF Multipaz interoperability vector. The harness is not

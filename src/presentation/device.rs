@@ -16,6 +16,9 @@
 //!
 //! You can view examples in `tests` directory in `simulated_device_and_reader.rs`, for a basic example and
 //! `simulated_device_and_reader_state.rs` which uses `State` pattern, `Arc` and `Mutex`.
+use crate::cose::sign1::P256Verifier;
+#[cfg(feature = "issuer-planning")]
+use crate::issuance::Mdoc;
 use crate::{
     cbor,
     cose::{mac0::PreparedCoseMac0, sign1::PreparedCoseSign1, MaybeTagged},
@@ -39,12 +42,10 @@ use crate::{
         },
         CoseKey, DeviceEngagement, DeviceResponse, IssuerSignedItem, Mso, SessionEstablishment,
     },
-    issuance::Mdoc,
 };
 use coset::Label;
 use coset::{CoseMac0Builder, CoseSign1, CoseSign1Builder};
-use ecdsa::VerifyingKey;
-use p256::{FieldBytes, NistP256};
+use p256::FieldBytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use session::SessionTranscript180135;
@@ -620,8 +621,8 @@ impl SessionManager {
         outcome.errors.extend(x5chain_validation_outcome.errors);
 
         // TODO: Support more than P-256.
-        let verifier: VerifyingKey<NistP256> = match x5chain.end_entity_public_key() {
-            Ok(verifier) => verifier,
+        let verifier: P256Verifier = match x5chain.end_entity_public_key() {
+            Ok(verifier) => verifier.into(),
             Err(e) => {
                 outcome.errors.push(format!(
                     "Processing: reader public key cannot be decoded: {e}"
@@ -654,12 +655,11 @@ impl SessionManager {
             }
         };
 
-        let verification_outcome = reader_auth
-            .verify::<VerifyingKey<NistP256>, p256::ecdsa::Signature>(
-                &verifier,
-                Some(&detached_payload),
-                None,
-            );
+        let verification_outcome = reader_auth.verify::<P256Verifier, p256::ecdsa::Signature>(
+            &verifier,
+            Some(&detached_payload),
+            None,
+        );
 
         if let Err(e) = verification_outcome.into_result() {
             outcome.errors.push(format!(
@@ -970,6 +970,7 @@ impl DeviceSession for SessionManager {
     }
 }
 
+#[cfg(feature = "issuer-planning")]
 impl From<Mdoc> for Document {
     fn from(mdoc: Mdoc) -> Document {
         fn extract(

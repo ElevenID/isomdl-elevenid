@@ -558,7 +558,7 @@ impl From<ServerRetrievalMethods> for ciborium::Value {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "session-key-agreement"))]
 mod test {
     use uuid::Uuid;
 

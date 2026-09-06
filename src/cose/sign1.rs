@@ -21,15 +21,8 @@ use crate::cose::{MaybeTagged, SignatureAlgorithm};
 /// Example:
 /// ```
 /// use coset::iana;
-/// use hex::FromHex;
-/// use p256::ecdsa::{Signature, SigningKey};
-/// use p256::SecretKey;
-/// use signature::{SignatureEncoding, Signer, SignerMut};
-/// use isomdl::cose::sign1::{Error, PreparedCoseSign1};
-/// use isomdl::cose::SignatureAlgorithm;
+/// use isomdl::cose::sign1::PreparedCoseSign1;
 ///
-/// let key = Vec::<u8>::from_hex("57c92077664146e876760c9520d054aa93c3afb04e306705db6090308507b4d3").unwrap();
-/// let signer: SigningKey = SecretKey::from_slice(&key).unwrap().into();
 /// let protected = coset::HeaderBuilder::new()
 ///     .algorithm(iana::Algorithm::ES256)
 ///     .build();
@@ -40,18 +33,10 @@ use crate::cose::{MaybeTagged, SignatureAlgorithm};
 ///     .payload(b"This is the content.".to_vec());
 /// let prepared = PreparedCoseSign1::new(builder, None, None, true).unwrap();
 /// let signature_payload = prepared.signature_payload();
-/// let signature = sign::<SigningKey, Signature>(signature_payload, &signer).unwrap();
+/// // Send `signature_payload` to the configured remote signer. The returned
+/// // signature is supplied here as fixed example data.
+/// let signature = vec![0; 64];
 /// let cose_sign1 = prepared.finalize(signature);
-///
-/// fn sign<S, Sig>(signature_payload: &[u8], s: &S) -> anyhow::Result<Vec<u8>>
-/// where
-///     S: Signer<Sig> + SignatureAlgorithm,
-///     Sig: SignatureEncoding,
-/// {
-///     Ok(s.try_sign(signature_payload)
-///         .map_err(Error::Signing)?
-///         .to_vec())
-/// }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedCoseSign1 {
     cose_sign1: MaybeTagged<CoseSign1>,
@@ -78,6 +63,78 @@ pub enum Error {
 
 /// Result with error type: [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// P-256 verifier which omits the curve crate's combined ECDSA signing feature.
+#[cfg(feature = "presentation-verifier")]
+#[derive(Clone, Debug)]
+pub struct P256Verifier(::p256::ProjectivePoint);
+
+#[cfg(feature = "presentation-verifier")]
+impl P256Verifier {
+    /// Parse a SEC1-encoded P-256 public key.
+    pub fn from_sec1_bytes(bytes: &[u8]) -> std::result::Result<Self, elliptic_curve::Error> {
+        let key = ::p256::PublicKey::from_sec1_bytes(bytes)?;
+        Ok(Self(::p256::ProjectivePoint::from(*key.as_affine())))
+    }
+}
+
+#[cfg(feature = "presentation-verifier")]
+impl From<ecdsa::VerifyingKey<::p256::NistP256>> for P256Verifier {
+    fn from(key: ecdsa::VerifyingKey<::p256::NistP256>) -> Self {
+        Self(::p256::ProjectivePoint::from(*key.as_affine()))
+    }
+}
+
+#[cfg(feature = "presentation-verifier")]
+impl Verifier<ecdsa::Signature<::p256::NistP256>> for P256Verifier {
+    fn verify(
+        &self,
+        message: &[u8],
+        signature: &ecdsa::Signature<::p256::NistP256>,
+    ) -> std::result::Result<(), signature::Error> {
+        use sha2::Digest as _;
+
+        let digest = sha2::Sha256::digest(message);
+        let z = ecdsa::hazmat::bits2field::<::p256::NistP256>(&digest)?;
+        ecdsa::hazmat::verify_prehashed::<::p256::NistP256>(&self.0, &z, signature)
+    }
+}
+
+/// P-384 verifier which omits the curve crate's combined ECDSA signing feature.
+#[cfg(feature = "presentation-verifier")]
+#[derive(Clone, Debug)]
+pub struct P384Verifier(::p384::ProjectivePoint);
+
+#[cfg(feature = "presentation-verifier")]
+impl P384Verifier {
+    /// Parse a SEC1-encoded P-384 public key.
+    pub fn from_sec1_bytes(bytes: &[u8]) -> std::result::Result<Self, elliptic_curve::Error> {
+        let key = ::p384::PublicKey::from_sec1_bytes(bytes)?;
+        Ok(Self(::p384::ProjectivePoint::from(*key.as_affine())))
+    }
+}
+
+#[cfg(feature = "presentation-verifier")]
+impl From<ecdsa::VerifyingKey<::p384::NistP384>> for P384Verifier {
+    fn from(key: ecdsa::VerifyingKey<::p384::NistP384>) -> Self {
+        Self(::p384::ProjectivePoint::from(*key.as_affine()))
+    }
+}
+
+#[cfg(feature = "presentation-verifier")]
+impl Verifier<ecdsa::Signature<::p384::NistP384>> for P384Verifier {
+    fn verify(
+        &self,
+        message: &[u8],
+        signature: &ecdsa::Signature<::p384::NistP384>,
+    ) -> std::result::Result<(), signature::Error> {
+        use sha2::Digest as _;
+
+        let digest = sha2::Sha384::digest(message);
+        let z = ecdsa::hazmat::bits2field::<::p384::NistP384>(&digest)?;
+        ecdsa::hazmat::verify_prehashed::<::p384::NistP384>(&self.0, &z, signature)
+    }
+}
 
 /// Result for verification of a COSE_Sign1.
 #[derive(Debug)]
@@ -153,6 +210,14 @@ impl PreparedCoseSign1 {
         &self.signature_payload
     }
 
+    /// Returns the protected signature algorithm, when it is an assigned IANA value.
+    pub fn algorithm(&self) -> Option<coset::iana::Algorithm> {
+        match self.cose_sign1.inner.protected.header.alg.as_ref() {
+            Some(RegisteredLabelWithPrivate::Assigned(algorithm)) => Some(*algorithm),
+            _ => None,
+        }
+    }
+
     /// Finalize the COSE_Sign1 by adding the signature.
     pub fn finalize(self, signature: Vec<u8>) -> MaybeTagged<CoseSign1> {
         let mut cose_sign1 = self.cose_sign1;
@@ -225,45 +290,71 @@ impl MaybeTagged<CoseSign1> {
     }
 }
 
+#[cfg(any(feature = "issuer-local-signing", feature = "presentation-verifier"))]
 mod p256 {
+    #[cfg(feature = "presentation-verifier")]
+    use super::P256Verifier;
     use coset::iana;
+    #[cfg(feature = "issuer-local-signing")]
     use p256::ecdsa::{SigningKey, VerifyingKey};
 
     use crate::cose::SignatureAlgorithm;
 
+    #[cfg(feature = "issuer-local-signing")]
     impl SignatureAlgorithm for SigningKey {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES256
         }
     }
 
+    #[cfg(feature = "issuer-local-signing")]
     impl SignatureAlgorithm for VerifyingKey {
+        fn algorithm(&self) -> iana::Algorithm {
+            iana::Algorithm::ES256
+        }
+    }
+
+    #[cfg(feature = "presentation-verifier")]
+    impl SignatureAlgorithm for P256Verifier {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES256
         }
     }
 }
 
+#[cfg(any(feature = "issuer-local-signing", feature = "presentation-verifier"))]
 mod p384 {
+    #[cfg(feature = "presentation-verifier")]
+    use super::P384Verifier;
     use coset::iana;
+    #[cfg(feature = "issuer-local-signing")]
     use p384::ecdsa::{SigningKey, VerifyingKey};
 
     use crate::cose::SignatureAlgorithm;
 
+    #[cfg(feature = "issuer-local-signing")]
     impl SignatureAlgorithm for SigningKey {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES384
         }
     }
 
+    #[cfg(feature = "issuer-local-signing")]
     impl SignatureAlgorithm for VerifyingKey {
+        fn algorithm(&self) -> iana::Algorithm {
+            iana::Algorithm::ES384
+        }
+    }
+
+    #[cfg(feature = "presentation-verifier")]
+    impl SignatureAlgorithm for P384Verifier {
         fn algorithm(&self) -> iana::Algorithm {
             iana::Algorithm::ES384
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "issuer-local-signing"))]
 mod tests {
     use crate::cbor;
     use crate::cose::sign1::{CoseSign1, Error, PreparedCoseSign1};

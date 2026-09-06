@@ -4,3 +4,20 @@
 pub mod mdoc;
 
 pub use mdoc::{Mdoc, MdocBatchItem, Namespaces, PreparedMdocBatchItem};
+
+/// Marker used to document the local-signing capability boundary.
+///
+/// Direct signing entry points are deliberately absent unless the
+/// `issuer-local-signing` feature is enabled. KMS-backed issuers use
+/// `Mdoc::prepare`, `PreparedMdoc::signature_payload`, and
+/// `PreparedMdoc::complete` instead.
+///
+/// ```compile_fail
+/// use isomdl::issuance::Mdoc;
+///
+/// fn direct_signing_is_not_available() {
+///     let _ = Mdoc::issue;
+/// }
+/// ```
+#[cfg(not(feature = "issuer-local-signing"))]
+pub struct LocalSigningDisabled;

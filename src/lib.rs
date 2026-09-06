@@ -234,11 +234,30 @@
 pub mod cbor;
 pub mod cose;
 pub mod definitions;
+#[cfg(feature = "issuer-planning")]
 pub mod digest_executor;
+#[cfg(feature = "issuer-planning")]
 pub mod issuance;
+#[cfg(feature = "presentation-verifier")]
 pub mod presentation;
-#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    feature = "issuer-planning",
+    feature = "simd",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 mod simd_sha256;
+
+/// Marker used to document the issuer-planning capability boundary.
+///
+/// ```compile_fail
+/// use isomdl::issuance::Mdoc;
+///
+/// fn issuer_api_is_not_available() {
+///     let _ = Mdoc::builder();
+/// }
+/// ```
+#[cfg(not(feature = "issuer-planning"))]
+pub struct IssuerPlanningDisabled;
 
 pub mod macros {
     pub use isomdl_macros::{FromJson, ToCbor};

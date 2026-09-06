@@ -7,6 +7,9 @@ use coset::iana::Algorithm;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use isomdl::definitions::device_key::cose_key::{CoseKey, EC2Curve, EC2Y};
 use isomdl::definitions::{DeviceKeyInfo, DigestAlgorithm, ValidityInfo};
+#[cfg(feature = "parallel")]
+use isomdl::digest_executor::NativeParallelDigestExecutor;
+use isomdl::digest_executor::{DigestExecutor, SerialDigestExecutor};
 use isomdl::issuance::mdoc::{Mdoc, Namespaces};
 use time::OffsetDateTime;
 
@@ -18,6 +21,9 @@ enum PayloadClass {
     Medium,
     Portrait,
     Mixed,
+    Uniform256,
+    Uniform4096,
+    DigestHeavy,
 }
 
 #[derive(Clone)]
@@ -41,6 +47,25 @@ impl PrepareInput {
                 self.device_key_info,
                 Algorithm::ES256,
                 self.enable_decoy_digests,
+            )
+            .expect("benchmark fixture must prepare a valid mdoc"),
+        );
+    }
+
+    fn prepare_with_digest_executor<E>(self, digest_executor: &E)
+    where
+        E: DigestExecutor,
+    {
+        black_box(
+            Mdoc::prepare_with_digest_executor(
+                self.doc_type,
+                self.namespaces,
+                self.validity_info,
+                self.digest_algorithm,
+                self.device_key_info,
+                Algorithm::ES256,
+                self.enable_decoy_digests,
+                digest_executor,
             )
             .expect("benchmark fixture must prepare a valid mdoc"),
         );
@@ -128,6 +153,15 @@ fn payload(class: PayloadClass, ordinal: usize) -> Value {
                 ),
             ]),
         },
+        PayloadClass::Uniform256 => Value::Bytes(vec![(ordinal % 251) as u8; 256]),
+        PayloadClass::Uniform4096 => Value::Bytes(vec![(ordinal % 251) as u8; 4_096]),
+        PayloadClass::DigestHeavy => {
+            const INPUT_LENGTHS: [usize; 5] = [16, 64, 256, 1_024, 4_096];
+            Value::Bytes(vec![
+                (ordinal % 251) as u8;
+                INPUT_LENGTHS[ordinal % INPUT_LENGTHS.len()]
+            ])
+        }
     }
 }
 
@@ -198,6 +232,75 @@ fn benchmark_mdoc_prepare(criterion: &mut Criterion) {
         });
     }
     payloads.finish();
+
+    let mut adaptive = criterion.benchmark_group("mdoc_prepare/adaptive");
+    adaptive.throughput(Throughput::Elements(1));
+    for (name, payload_class, algorithm) in [
+        (
+            "uniform-256",
+            PayloadClass::Uniform256,
+            DigestAlgorithm::SHA256,
+        ),
+        (
+            "uniform-4096",
+            PayloadClass::Uniform4096,
+            DigestAlgorithm::SHA256,
+        ),
+        (
+            "uniform-4096-sha384",
+            PayloadClass::Uniform4096,
+            DigestAlgorithm::SHA384,
+        ),
+        (
+            "uniform-4096-sha512",
+            PayloadClass::Uniform4096,
+            DigestAlgorithm::SHA512,
+        ),
+        (
+            "digest-heavy",
+            PayloadClass::DigestHeavy,
+            DigestAlgorithm::SHA256,
+        ),
+    ] {
+        let input = prepare_input(512, payload_class, algorithm, false);
+        adaptive.bench_with_input(
+            BenchmarkId::new(format!("serial-oracle-{name}"), 512),
+            &input,
+            |bencher, input| {
+                bencher.iter_batched(
+                    || input.clone(),
+                    |input| input.prepare_with_digest_executor(&SerialDigestExecutor),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+        adaptive.bench_with_input(
+            BenchmarkId::new(format!("default-candidate-{name}"), 512),
+            &input,
+            |bencher, input| {
+                bencher.iter_batched(
+                    || input.clone(),
+                    PrepareInput::prepare,
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+        #[cfg(feature = "parallel")]
+        adaptive.bench_with_input(
+            BenchmarkId::new(format!("native-4-{name}"), 512),
+            &input,
+            |bencher, input| {
+                let executor =
+                    NativeParallelDigestExecutor::new(std::num::NonZeroUsize::new(4).unwrap());
+                bencher.iter_batched(
+                    || input.clone(),
+                    |input| input.prepare_with_digest_executor(&executor),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    adaptive.finish();
 }
 
 fn criterion_config() -> Criterion {

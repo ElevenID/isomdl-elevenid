@@ -5,29 +5,41 @@
 use super::helpers::Tag24;
 use super::DeviceEngagement;
 use crate::definitions::device_engagement::EReaderKeyBytes;
+#[cfg(feature = "session-key-agreement")]
 use crate::definitions::device_key::cose_key::EC2Y;
 use crate::definitions::device_key::CoseKey;
+#[cfg(feature = "session-key-agreement")]
 use crate::definitions::device_key::EC2Curve;
 use crate::definitions::helpers::bytestr::ByteStr;
+#[cfg(feature = "session-key-agreement")]
 use crate::definitions::session::EncodedPoints::{Ep256, Ep384};
 
+#[cfg(feature = "session-key-agreement")]
 use aes::cipher::{generic_array::GenericArray, typenum::U32};
+#[cfg(feature = "session-key-agreement")]
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm,
     Nonce, // Or `Aes128Gcm`
 };
 use anyhow::Result;
+#[cfg(feature = "session-key-agreement")]
 use ecdsa::EncodedPoint;
+#[cfg(feature = "session-key-agreement")]
 use elliptic_curve::{
     ecdh::EphemeralSecret, ecdh::SharedSecret, generic_array::sequence::Concat,
     sec1::FromEncodedPoint,
 };
+#[cfg(feature = "session-key-agreement")]
 use hkdf::Hkdf;
+#[cfg(feature = "session-key-agreement")]
 use p256::NistP256;
+#[cfg(feature = "session-key-agreement")]
 use p384::NistP384;
+#[cfg(feature = "session-key-agreement")]
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "session-key-agreement")]
 use sha2::{Digest, Sha256};
 
 pub type EReaderKey = CoseKey;
@@ -104,6 +116,7 @@ pub struct SessionTranscript180135(
 
 impl SessionTranscript for SessionTranscript180135 {}
 
+#[cfg(feature = "session-key-agreement")]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
     #[error("Curve not supported for DH exchange")]
@@ -124,6 +137,7 @@ pub enum Handover {
     OID4VP(String, String),
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub enum EphemeralSecrets {
     /// Represents an Eph256 session.
     /// This enum variant holds an `EphemeralSecret` of type `NistP256`.
@@ -133,6 +147,7 @@ pub enum EphemeralSecrets {
     Eph384(EphemeralSecret<NistP384>),
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub enum EncodedPoints {
     /// Represents a session with an Ep256 encoded point.
     Ep256(EncodedPoint<NistP256>),
@@ -142,6 +157,7 @@ pub enum EncodedPoints {
     Ep384(EncodedPoint<NistP384>),
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub enum SharedSecrets {
     /// Represents a session with a shared secret using the `SS256` algorithm.
     /// The shared secret is generated using the `NistP256` elliptic curve.
@@ -152,6 +168,7 @@ pub enum SharedSecrets {
     Ss384(SharedSecret<NistP384>),
 }
 
+#[cfg(feature = "session-key-agreement")]
 impl From<EncodedPoints> for Vec<u8> {
     fn from(ep: EncodedPoints) -> Vec<u8> {
         match ep {
@@ -161,6 +178,7 @@ impl From<EncodedPoints> for Vec<u8> {
     }
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn create_p256_ephemeral_keys() -> Result<(p256::SecretKey, CoseKey), Error> {
     let private_key = p256::SecretKey::random(&mut OsRng);
 
@@ -178,6 +196,7 @@ pub fn create_p256_ephemeral_keys() -> Result<(p256::SecretKey, CoseKey), Error>
     Ok((private_key, public_key))
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn get_shared_secret(
     cose_key: CoseKey,
     e_device_key_priv: &p256::NonZeroScalar,
@@ -194,6 +213,7 @@ pub fn get_shared_secret(
     Ok(shared_secret)
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn derive_session_key(
     shared_secret: &SharedSecret<NistP256>,
     session_transcript: &SessionTranscriptBytes,
@@ -218,6 +238,7 @@ pub fn derive_session_key(
     Ok(okm.into())
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn encrypt_device_data(
     sk_device: &GenericArray<u8, U32>,
     plaintext: &[u8],
@@ -226,6 +247,7 @@ pub fn encrypt_device_data(
     encrypt(sk_device, plaintext, message_count, false)
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn encrypt_reader_data(
     sk_reader: &GenericArray<u8, U32>,
     plaintext: &[u8],
@@ -234,6 +256,7 @@ pub fn encrypt_reader_data(
     encrypt(sk_reader, plaintext, message_count, true)
 }
 
+#[cfg(feature = "session-key-agreement")]
 fn encrypt(
     session_key: &GenericArray<u8, U32>,
     plaintext: &[u8],
@@ -245,6 +268,7 @@ fn encrypt(
     Aes256Gcm::new(session_key).encrypt(&nonce, plaintext)
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn decrypt_device_data(
     sk_device: &GenericArray<u8, U32>,
     ciphertext: &[u8],
@@ -253,6 +277,7 @@ pub fn decrypt_device_data(
     decrypt(sk_device, ciphertext, message_count, false)
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn decrypt_reader_data(
     sk_reader: &GenericArray<u8, U32>,
     ciphertext: &[u8],
@@ -261,6 +286,7 @@ pub fn decrypt_reader_data(
     decrypt(sk_reader, ciphertext, message_count, true)
 }
 
+#[cfg(feature = "session-key-agreement")]
 fn decrypt(
     session_key: &GenericArray<u8, U32>,
     ciphertext: &[u8],
@@ -272,6 +298,7 @@ fn decrypt(
     Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext)
 }
 
+#[cfg(feature = "session-key-agreement")]
 pub fn get_initialization_vector(message_count: &mut u32, reader: bool) -> [u8; 12] {
     *message_count += 1;
     let counter = GenericArray::from(message_count.to_be_bytes());
@@ -284,7 +311,7 @@ pub fn get_initialization_vector(message_count: &mut u32, reader: bool) -> [u8; 
     identifier.concat(counter).into()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "session-key-agreement"))]
 mod test {
     use super::*;
     use crate::cbor;

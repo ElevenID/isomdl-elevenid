@@ -4,17 +4,23 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "issuer-local-signing")]
 use async_signature::AsyncSigner;
 use coset::iana::Algorithm;
 use coset::{CoseSign1, Label};
 use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "issuer-local-signing")]
 use signature::{SignatureEncoding, Signer};
 
 use crate::cose::sign1::PreparedCoseSign1;
-use crate::cose::{MaybeTagged, SignatureAlgorithm};
+use crate::cose::MaybeTagged;
+#[cfg(feature = "issuer-local-signing")]
+use crate::cose::SignatureAlgorithm;
+#[cfg(all(test, feature = "issuer-local-signing"))]
+use crate::digest_executor::SerialDigestExecutor;
 use crate::digest_executor::{
-    digest_length, DigestExecutor, DigestJob, DigestResult, SerialDigestExecutor,
+    digest_length, DefaultDigestExecutor, DigestExecutor, DigestJob, DigestResult,
 };
 use crate::{
     definitions::x509::x5chain::{X5Chain, X5CHAIN_COSE_HEADER_LABEL},
@@ -172,6 +178,9 @@ impl Mdoc {
     }
 
     /// Prepare mdoc for remote signing.
+    ///
+    /// Builds without `parallel` use the scalar digest oracle. Builds with the
+    /// feature use the bounded adaptive native policy for qualified workloads.
     pub fn prepare(
         doc_type: String,
         namespaces: Namespaces,
@@ -189,7 +198,7 @@ impl Mdoc {
             device_key_info,
             signature_algorithm,
             enable_decoy_digests,
-            &SerialDigestExecutor,
+            &DefaultDigestExecutor,
         )
     }
 
@@ -235,18 +244,19 @@ impl Mdoc {
 
     /// Prepare a caller-ordered batch of mdocs for remote signing.
     ///
-    /// The scalar [`SerialDigestExecutor`] is the normative default. All batch
-    /// inputs are validated before randomness is allocated. Randomness is then
-    /// consumed strictly in caller order, all digest jobs are submitted once,
-    /// and results are restored by `(credential_id, job_id)` before any
-    /// prepared value is returned. An empty batch returns an empty vector
-    /// without invoking an executor.
+    /// Without the `parallel` feature, the scalar
+    /// [`SerialDigestExecutor`](crate::digest_executor::SerialDigestExecutor)
+    /// is the exact default. Feature-enabled builds use the conservative
+    /// adaptive native policy. All batch inputs are validated before randomness
+    /// is allocated. Randomness is then consumed strictly in caller order, all
+    /// digest jobs are submitted once, and results are restored by
+    /// `(credential_id, job_id)` before any prepared value is returned. An
+    /// empty batch returns an empty vector without invoking an executor.
     ///
     /// This operation only prepares existing COSE signature payloads. It does
-    /// not sign, issue, activate, or change the default route of any existing
-    /// single-credential entry point. Any error discards the entire batch.
+    /// not sign, issue, or activate. Any error discards the entire batch.
     pub fn prepare_batch(batch: Vec<MdocBatchItem>) -> Result<Vec<PreparedMdocBatchItem>> {
-        Self::prepare_batch_with_digest_executor(batch, &SerialDigestExecutor)
+        Self::prepare_batch_with_digest_executor(batch, &DefaultDigestExecutor)
     }
 
     /// Prepare a caller-ordered batch with one caller-selected digest executor.
@@ -261,7 +271,7 @@ impl Mdoc {
     ///
     /// Validation, planning, execution, restoration, and preparation are
     /// all-or-nothing: no [`PreparedMdocBatchItem`] is returned on any error.
-    /// This method does not sign, issue, activate, or alter default routing.
+    /// This method does not sign, issue, or activate.
     pub fn prepare_batch_with_digest_executor<E>(
         batch: Vec<MdocBatchItem>,
         digest_executor: &E,
@@ -454,6 +464,7 @@ impl Mdoc {
     }
 
     /// Directly sign and issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     #[allow(clippy::too_many_arguments)]
     pub fn issue<S, Sig>(
         doc_type: String,
@@ -485,10 +496,11 @@ impl Mdoc {
             .map_err(|e| anyhow!("error signing cosesign1: {}", e))?
             .to_vec();
 
-        Ok(prepared_mdoc.complete(x5chain, signature))
+        prepared_mdoc.complete(x5chain, signature)
     }
 
     /// Directly sign and issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     #[allow(clippy::too_many_arguments)]
     pub async fn issue_async<S, Sig>(
         doc_type: String,
@@ -521,7 +533,7 @@ impl Mdoc {
             .map_err(|e| anyhow!("error signing cosesign1: {}", e))?
             .to_vec();
 
-        Ok(prepared_mdoc.complete(x5chain, signature))
+        prepared_mdoc.complete(x5chain, signature)
     }
 }
 
@@ -533,7 +545,12 @@ impl PreparedMdoc {
 
     /// Supply the remotely signed signature and x5chain containing the issuing certificate
     /// to complete and issue the prepared mdoc.
-    pub fn complete(self, x5chain: X5Chain, signature: Vec<u8>) -> Mdoc {
+    pub fn complete(self, x5chain: X5Chain, signature: Vec<u8>) -> Result<Mdoc> {
+        let algorithm = self
+            .prepared_sig
+            .algorithm()
+            .ok_or_else(|| anyhow!("prepared mdoc is missing a protected signature algorithm"))?;
+        validate_remote_signature(algorithm, &signature)?;
         let PreparedMdoc {
             doc_type,
             namespaces,
@@ -547,13 +564,33 @@ impl PreparedMdoc {
             .unprotected
             .rest
             .push((Label::Int(X5CHAIN_COSE_HEADER_LABEL), x5chain.into_cbor()));
-        Mdoc {
+        Ok(Mdoc {
             doc_type,
             mso,
             namespaces,
             issuer_auth,
-        }
+        })
     }
+}
+
+fn validate_remote_signature(algorithm: Algorithm, signature: &[u8]) -> Result<()> {
+    let valid = match algorithm {
+        Algorithm::ES256 => p256::ecdsa::Signature::from_slice(signature).is_ok(),
+        Algorithm::ES384 => p384::ecdsa::Signature::from_slice(signature).is_ok(),
+        Algorithm::ES512 => p521::ecdsa::Signature::from_slice(signature).is_ok(),
+        _ => {
+            return Err(anyhow!(
+                "unsupported remote mdoc signing algorithm: {algorithm:?}"
+            ))
+        }
+    };
+    if !valid {
+        return Err(anyhow!(
+            "invalid {algorithm:?} remote signature encoding: got {} bytes",
+            signature.len()
+        ));
+    }
+    Ok(())
 }
 
 impl Builder {
@@ -597,8 +634,10 @@ impl Builder {
     ///
     /// The signature algorithm which the mdoc will be signed with must be known ahead of time as
     /// it is a required field in the signature headers.
+    /// Builds with `parallel` use the bounded adaptive digest policy for
+    /// qualified workloads; other builds use the exact scalar oracle.
     pub fn prepare(self, signature_algorithm: Algorithm) -> Result<PreparedMdoc> {
-        self.prepare_with_digest_executor(signature_algorithm, &SerialDigestExecutor)
+        self.prepare_with_digest_executor(signature_algorithm, &DefaultDigestExecutor)
     }
 
     /// Prepare an mdoc with a caller-selected digest executor.
@@ -643,6 +682,7 @@ impl Builder {
     }
 
     /// Directly issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     pub fn issue<S, Sig>(self, x5chain: X5Chain, signer: S) -> Result<Mdoc>
     where
         S: Signer<Sig> + SignatureAlgorithm,
@@ -678,6 +718,7 @@ impl Builder {
     }
 
     /// Directly issue an mdoc.
+    #[cfg(feature = "issuer-local-signing")]
     pub async fn issue_async<S, Sig>(self, x5chain: X5Chain, signer: S) -> Result<Mdoc>
     where
         S: AsyncSigner<Sig> + SignatureAlgorithm,
@@ -1197,7 +1238,7 @@ where
     digest_id
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "issuer-local-signing"))]
 pub mod test {
     use elliptic_curve::sec1::ToEncodedPoint;
     use p256::ecdsa::{Signature, SigningKey};
@@ -1475,6 +1516,50 @@ pub mod test {
             error.to_string(),
             "at least one element required in each namespace"
         );
+    }
+
+    #[test]
+    fn remote_completion_rejects_malformed_es256_signatures() {
+        let chain = || {
+            X5Chain::builder()
+                .with_pem_certificate(ISSUER_CERT)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let prepare = || {
+            minimal_test_mdoc_builder()
+                .prepare(Algorithm::ES256)
+                .unwrap()
+        };
+
+        assert!(prepare().complete(chain(), vec![]).is_err());
+        assert!(prepare().complete(chain(), vec![0; 63]).is_err());
+
+        let mut der_encoded = vec![0; 70];
+        der_encoded[0] = 0x30;
+        assert!(prepare().complete(chain(), der_encoded).is_err());
+
+        assert!(prepare().complete(chain(), vec![0; 64]).is_err());
+        assert!(prepare().complete(chain(), vec![0xff; 64]).is_err());
+
+        let mut valid = vec![0; 64];
+        valid[31] = 1;
+        valid[63] = 1;
+        assert!(prepare().complete(chain(), valid).is_ok());
+    }
+
+    #[test]
+    fn remote_signature_validation_covers_all_supported_curves() {
+        for (algorithm, width) in [(Algorithm::ES384, 96), (Algorithm::ES512, 132)] {
+            let mut valid = vec![0u8; width];
+            valid[width / 2 - 1] = 1;
+            valid[width - 1] = 1;
+            assert!(validate_remote_signature(algorithm, &valid).is_ok());
+            assert!(validate_remote_signature(algorithm, &vec![0u8; width]).is_err());
+            assert!(validate_remote_signature(algorithm, &vec![0xffu8; width]).is_err());
+        }
+        assert!(validate_remote_signature(Algorithm::EdDSA, &[1u8; 64]).is_err());
     }
 
     pub fn minimal_test_mdoc() -> anyhow::Result<Mdoc> {
@@ -2439,7 +2524,6 @@ pub mod test {
         Ok(())
     }
 
-    #[cfg(any(feature = "parallel", feature = "simd"))]
     fn assert_executor_preserves_fixed_randomness_mdoc_bytes<E>(executor: &E) -> anyhow::Result<()>
     where
         E: DigestExecutor,
@@ -2500,6 +2584,11 @@ pub mod test {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn default_executor_preserves_fixed_randomness_mdoc_bytes() -> anyhow::Result<()> {
+        assert_executor_preserves_fixed_randomness_mdoc_bytes(&DefaultDigestExecutor)
     }
 
     #[cfg(feature = "parallel")]
@@ -3134,5 +3223,27 @@ pub mod test {
                 .values()
                 .fold(0, |acc, x| acc + x.len()),
         );
+    }
+}
+
+#[cfg(all(test, feature = "issuer-planning"))]
+mod issuer_planning_tests {
+    use super::{validate_remote_signature, Algorithm};
+
+    #[test]
+    fn remote_signature_validation_covers_all_supported_curves() {
+        for (algorithm, width) in [
+            (Algorithm::ES256, 64),
+            (Algorithm::ES384, 96),
+            (Algorithm::ES512, 132),
+        ] {
+            let mut valid = vec![0u8; width];
+            valid[width / 2 - 1] = 1;
+            valid[width - 1] = 1;
+            assert!(validate_remote_signature(algorithm, &valid).is_ok());
+            assert!(validate_remote_signature(algorithm, &vec![0u8; width]).is_err());
+            assert!(validate_remote_signature(algorithm, &vec![0xffu8; width]).is_err());
+        }
+        assert!(validate_remote_signature(Algorithm::EdDSA, &[1u8; 64]).is_err());
     }
 }

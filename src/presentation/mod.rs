@@ -40,16 +40,22 @@
 //! You can see the example in `simulated_device_and_reader.rs` from `examples` directory or a version that
 //! uses **State pattern**, `Arc` and `Mutex` `simulated_device_and_reader_state.rs`.
 pub mod authentication;
+#[cfg(feature = "session-key-agreement")]
 pub mod device;
+#[cfg(feature = "session-key-agreement")]
 pub mod reader;
 pub mod reader_utils;
 
+#[cfg(feature = "session-key-agreement")]
 use anyhow::Result;
+#[cfg(feature = "session-key-agreement")]
 use base64::{decode, encode};
+#[cfg(feature = "session-key-agreement")]
 use serde::{Deserialize, Serialize};
 
 /// Trait that handles serialization of [CBOR](https://cbor.io) objects to/from [String].
 /// It is an auto trait.
+#[cfg(feature = "session-key-agreement")]
 pub trait Stringify: Serialize + for<'a> Deserialize<'a> {
     /// Serialize to [CBOR](https://cbor.io) representation.
     ///
@@ -101,16 +107,25 @@ pub trait Stringify: Serialize + for<'a> Deserialize<'a> {
     }
 }
 
+#[cfg(feature = "session-key-agreement")]
 impl Stringify for device::Document {}
+#[cfg(feature = "session-key-agreement")]
 impl Stringify for device::SessionManagerInit {}
+#[cfg(feature = "session-key-agreement")]
 impl Stringify for device::SessionManagerEngaged {}
+#[cfg(feature = "session-key-agreement")]
 impl Stringify for device::SessionManager {}
+#[cfg(feature = "session-key-agreement")]
 impl Stringify for reader::SessionManager {}
 
+#[cfg(feature = "session-key-agreement")]
 use crate::definitions::{device_key::cose_key::CoseKey, helpers::Tag24};
+#[cfg(feature = "session-key-agreement")]
 use hkdf::Hkdf;
+#[cfg(feature = "session-key-agreement")]
 use sha2::Sha256;
 
+#[cfg(feature = "session-key-agreement")]
 fn calculate_ble_ident(e_device_key: &Tag24<CoseKey>) -> Result<[u8; 16]> {
     let e_device_key_bytes = crate::cbor::to_vec(e_device_key)?;
     let mut ble_ident = [0u8; 16];
@@ -121,3 +136,27 @@ fn calculate_ble_ident(e_device_key: &Tag24<CoseKey>) -> Result<[u8; 16]> {
 
     Ok(ble_ident)
 }
+
+/// Marker used to document the ephemeral session capability boundary.
+///
+/// Passive verification remains available with `presentation-verifier`, while
+/// reader/device state machines that generate or retain ephemeral secrets
+/// require `session-key-agreement`.
+///
+/// ```compile_fail
+/// use isomdl::presentation::reader::SessionManager;
+///
+/// fn session_api_is_not_available() {
+///     let _ = core::mem::size_of::<SessionManager>();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use isomdl::definitions::session::create_p256_ephemeral_keys;
+///
+/// fn ephemeral_key_generation_is_not_available() {
+///     let _ = create_p256_ephemeral_keys();
+/// }
+/// ```
+#[cfg(not(feature = "session-key-agreement"))]
+pub struct SessionKeyAgreementDisabled;

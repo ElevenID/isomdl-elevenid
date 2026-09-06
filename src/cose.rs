@@ -5,6 +5,7 @@ use coset::{iana, AsCborValue, TaggedCborSerializable};
 
 use crate::cose::serialized_as_cbor_value::SerializedAsCborValue;
 
+#[cfg(feature = "session-key-agreement")]
 pub mod mac0;
 mod serialized_as_cbor_value;
 pub mod sign1;

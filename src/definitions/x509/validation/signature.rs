@@ -1,6 +1,7 @@
 use der::Encode;
-use ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use ecdsa::{Signature, VerifyingKey};
 use p256::NistP256;
+use sha2::Digest;
 use x509_cert::Certificate;
 
 use crate::definitions::x509::util::public_key;
@@ -32,7 +33,16 @@ pub fn issuer_signed_subject(subject: &Certificate, issuer: &Certificate) -> boo
         }
     };
 
-    match issuer_public_key.verify(&tbs, &sig) {
+    let digest = sha2::Sha256::digest(&tbs);
+    let z = match ecdsa::hazmat::bits2field::<NistP256>(&digest) {
+        Ok(z) => z,
+        Err(e) => {
+            tracing::error!("failed to prepare certificate signature digest: {e:?}");
+            return false;
+        }
+    };
+    let public_point = p256::ProjectivePoint::from(*issuer_public_key.as_affine());
+    match ecdsa::hazmat::verify_prehashed::<NistP256>(&public_point, &z, &sig) {
         Ok(()) => true,
         Err(e) => {
             tracing::info!("subject certificate signature could not be validated: {e:?}");
