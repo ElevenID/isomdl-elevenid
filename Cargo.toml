@@ -82,6 +82,11 @@ digest = "0.10.7"
 tracing = "0.1.41"
 sha1 = "0.10.6"
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# `rand` 0.8 delegates browser entropy to `getrandom` 0.2. Enable its JS
+# backend for the wasm target without adding that backend to native builds.
+getrandom = { version = "0.2", features = ["js"] }
+
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rayon = { version = "1.12", optional = true }
 
