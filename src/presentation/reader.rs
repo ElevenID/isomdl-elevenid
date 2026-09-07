@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use super::authentication::ResponseAuthenticationOutcome;
 use super::reader_utils::validate_response;
@@ -38,7 +37,7 @@ use crate::{
         helpers::{non_empty_vec, NonEmptyVec, Tag24},
         session::{
             self, create_p256_ephemeral_keys, derive_session_key, get_shared_secret, Handover,
-            SessionEstablishment,
+            SessionEstablishment, SessionKey,
         },
         x509::{trust_anchor::TrustAnchorRegistry, x5chain::X5CHAIN_COSE_HEADER_LABEL, X5Chain},
         DeviceEngagement, DeviceResponse, SessionData, SessionTranscript180135,
@@ -54,9 +53,9 @@ use crate::{
 /// The transition to this state is made by [SessionManager::establish_session].
 pub struct SessionManager {
     session_transcript: SessionTranscript180135,
-    sk_device: Zeroizing<[u8; 32]>,
+    sk_device: SessionKey,
     device_message_counter: u32,
-    sk_reader: Zeroizing<[u8; 32]>,
+    sk_reader: SessionKey,
     reader_message_counter: u32,
     trust_anchor_registry: TrustAnchorRegistry,
 }

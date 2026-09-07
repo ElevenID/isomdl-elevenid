@@ -50,6 +50,28 @@ pub type DeviceEngagementBytes = Tag24<DeviceEngagement>;
 pub type SessionTranscriptBytes = Tag24<SessionTranscript180135>;
 pub type NfcHandover = (ByteStr, Option<ByteStr>);
 
+/// An in-memory session encryption key that zeroizes on drop and never exposes
+/// its bytes through diagnostic formatting.
+#[cfg(feature = "session-key-agreement")]
+pub struct SessionKey(Zeroizing<[u8; 32]>);
+
+#[cfg(feature = "session-key-agreement")]
+impl AsRef<[u8]> for SessionKey {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+#[cfg(feature = "session-key-agreement")]
+impl std::fmt::Debug for SessionKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("SessionKey")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Represents the establishment of a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -220,7 +242,7 @@ pub fn derive_session_key(
     shared_secret: &SharedSecret<NistP256>,
     session_transcript: &SessionTranscriptBytes,
     reader: bool,
-) -> Result<Zeroizing<[u8; 32]>> {
+) -> Result<SessionKey> {
     let salt = Sha256::digest(
         crate::cbor::to_vec(session_transcript)
             .map_err(|e| anyhow::anyhow!("failed to serialize session transcript: {e}"))?,
@@ -237,7 +259,7 @@ pub fn derive_session_key(
         Hkdf::expand(&hkdf, sk_device, okm.as_mut()).unwrap();
     }
 
-    Ok(okm)
+    Ok(SessionKey(okm))
 }
 
 #[cfg(feature = "session-key-agreement")]
@@ -546,6 +568,8 @@ mod test {
         let session_key = derive_session_key(&shared_secret, &session_transcript, true).unwrap();
         let session_key_hex = hex::encode(session_key.as_ref());
         assert_eq!(session_key_hex, READER_SESSION_KEY);
+        assert_eq!(format!("{session_key:?}"), "SessionKey(\"[REDACTED]\")");
+        assert!(!format!("{session_key:?}").contains(READER_SESSION_KEY.trim()));
 
         let plaintext = decrypt_reader_data(
             GenericArray::from_slice(session_key.as_ref()),

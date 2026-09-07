@@ -35,7 +35,8 @@ use crate::{
         helpers::{tag24, NonEmptyMap, NonEmptyVec, Tag24},
         issuer_signed::{IssuerSigned, IssuerSignedItemBytes},
         session::{
-            self, derive_session_key, get_shared_secret, Handover, SessionData, SessionTranscript,
+            self, derive_session_key, get_shared_secret, Handover, SessionData, SessionKey,
+            SessionTranscript,
         },
         x509::{
             self, trust_anchor::TrustAnchorRegistry, x5chain::X5CHAIN_COSE_HEADER_LABEL, X5Chain,
@@ -51,7 +52,6 @@ use session::SessionTranscript180135;
 use std::collections::BTreeMap;
 use std::num::ParseIntError;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use super::{
     authentication::{AuthenticationStatus, RequestAuthenticationOutcome},
@@ -104,9 +104,9 @@ pub struct SessionManagerEngaged {
 pub struct SessionManager {
     documents: Documents,
     session_transcript: SessionTranscript180135,
-    sk_device: Zeroizing<[u8; 32]>,
+    sk_device: SessionKey,
     device_message_counter: u32,
-    sk_reader: Zeroizing<[u8; 32]>,
+    sk_reader: SessionKey,
     reader_message_counter: u32,
     state: State,
     trusted_verifiers: TrustAnchorRegistry,
