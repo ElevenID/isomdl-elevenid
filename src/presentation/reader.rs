@@ -306,7 +306,7 @@ impl SessionManager {
         };
         let device_request_bytes = cbor::to_vec(&device_request)?;
         session::encrypt_reader_data(
-            &(*self.sk_reader).into(),
+            aes::cipher::generic_array::GenericArray::from_slice(self.sk_reader.as_ref()),
             &device_request_bytes,
             &mut self.reader_message_counter,
         )
@@ -320,7 +320,7 @@ impl SessionManager {
             Some(r) => r,
         };
         let decrypted_response = session::decrypt_device_data(
-            &(*self.sk_device).into(),
+            aes::cipher::generic_array::GenericArray::from_slice(self.sk_device.as_ref()),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )
