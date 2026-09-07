@@ -41,12 +41,36 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "session-key-agreement")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "session-key-agreement")]
+use zeroize::Zeroizing;
 
 pub type EReaderKey = CoseKey;
 pub type EDeviceKey = CoseKey;
 pub type DeviceEngagementBytes = Tag24<DeviceEngagement>;
 pub type SessionTranscriptBytes = Tag24<SessionTranscript180135>;
 pub type NfcHandover = (ByteStr, Option<ByteStr>);
+
+/// An in-memory session encryption key that zeroizes on drop and never exposes
+/// its bytes through diagnostic formatting.
+#[cfg(feature = "session-key-agreement")]
+pub struct SessionKey(Zeroizing<[u8; 32]>);
+
+#[cfg(feature = "session-key-agreement")]
+impl AsRef<[u8]> for SessionKey {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+#[cfg(feature = "session-key-agreement")]
+impl std::fmt::Debug for SessionKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("SessionKey")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
 
 /// Represents the establishment of a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,24 +242,24 @@ pub fn derive_session_key(
     shared_secret: &SharedSecret<NistP256>,
     session_transcript: &SessionTranscriptBytes,
     reader: bool,
-) -> Result<GenericArray<u8, U32>> {
+) -> Result<SessionKey> {
     let salt = Sha256::digest(
         crate::cbor::to_vec(session_transcript)
             .map_err(|e| anyhow::anyhow!("failed to serialize session transcript: {e}"))?,
     );
     let hkdf = shared_secret.extract::<Sha256>(Some(salt.as_ref()));
-    let mut okm = [0u8; 32];
+    let mut okm = Zeroizing::new([0u8; 32]);
     let sk_device = "SKDevice".as_bytes();
     let sk_reader = "SKReader".as_bytes();
 
     // Safe to unwrap as error will only occur if okm.len() is greater than 255 * 32;
     if reader {
-        Hkdf::expand(&hkdf, sk_reader, &mut okm).unwrap();
+        Hkdf::expand(&hkdf, sk_reader, okm.as_mut()).unwrap();
     } else {
-        Hkdf::expand(&hkdf, sk_device, &mut okm).unwrap();
+        Hkdf::expand(&hkdf, sk_device, okm.as_mut()).unwrap();
     }
 
-    Ok(okm.into())
+    Ok(SessionKey(okm))
 }
 
 #[cfg(feature = "session-key-agreement")]
@@ -263,7 +287,7 @@ fn encrypt(
     message_count: &mut u32,
     reader: bool,
 ) -> Result<Vec<u8>, aes_gcm::Error> {
-    let initialization_vector = get_initialization_vector(message_count, reader);
+    let initialization_vector = get_initialization_vector(message_count, reader)?;
     let nonce = Nonce::from(initialization_vector);
     Aes256Gcm::new(session_key).encrypt(&nonce, plaintext)
 }
@@ -293,14 +317,17 @@ fn decrypt(
     message_count: &mut u32,
     reader: bool,
 ) -> Result<Vec<u8>, aes_gcm::Error> {
-    let initialization_vector = get_initialization_vector(message_count, reader);
+    let initialization_vector = get_initialization_vector(message_count, reader)?;
     let nonce = Nonce::from(initialization_vector);
     Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext)
 }
 
 #[cfg(feature = "session-key-agreement")]
-pub fn get_initialization_vector(message_count: &mut u32, reader: bool) -> [u8; 12] {
-    *message_count += 1;
+pub fn get_initialization_vector(
+    message_count: &mut u32,
+    reader: bool,
+) -> Result<[u8; 12], aes_gcm::Error> {
+    *message_count = message_count.checked_add(1).ok_or(aes_gcm::Error)?;
     let counter = GenericArray::from(message_count.to_be_bytes());
     let identifier = if reader {
         GenericArray::from([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
@@ -308,7 +335,7 @@ pub fn get_initialization_vector(message_count: &mut u32, reader: bool) -> [u8; 
         GenericArray::from([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8])
     };
 
-    identifier.concat(counter).into()
+    Ok(identifier.concat(counter).into())
 }
 
 #[cfg(all(test, feature = "session-key-agreement"))]
@@ -317,6 +344,14 @@ mod test {
     use crate::cbor;
     use crate::definitions::device_engagement::Security;
     use crate::definitions::device_request::DeviceRequest;
+
+    #[test]
+    fn initialization_vector_fails_closed_at_counter_exhaustion() {
+        let mut counter = u32::MAX;
+
+        assert!(get_initialization_vector(&mut counter, true).is_err());
+        assert_eq!(counter, u32::MAX);
+    }
 
     #[test]
     fn qr_handover() {
@@ -479,13 +514,21 @@ mod test {
 
         let mut message_count = 0;
 
-        let ciphertext =
-            encrypt_reader_data(&session_key_reader, plaintext, &mut message_count).unwrap();
+        let ciphertext = encrypt_reader_data(
+            GenericArray::from_slice(session_key_reader.as_ref()),
+            plaintext,
+            &mut message_count,
+        )
+        .unwrap();
 
         let mut message_count = 0;
 
-        let decrypted_plaintext =
-            decrypt_reader_data(&session_key_reader, &ciphertext, &mut message_count).unwrap();
+        let decrypted_plaintext = decrypt_reader_data(
+            GenericArray::from_slice(session_key_reader.as_ref()),
+            &ciphertext,
+            &mut message_count,
+        )
+        .unwrap();
 
         assert_eq!(plaintext, decrypted_plaintext);
     }
@@ -523,11 +566,17 @@ mod test {
             cbor::from_slice(&session_transcript_bytes).unwrap();
 
         let session_key = derive_session_key(&shared_secret, &session_transcript, true).unwrap();
-        let session_key_hex = hex::encode(session_key);
+        let session_key_hex = hex::encode(session_key.as_ref());
         assert_eq!(session_key_hex, READER_SESSION_KEY);
+        assert_eq!(format!("{session_key:?}"), "SessionKey(\"[REDACTED]\")");
+        assert!(!format!("{session_key:?}").contains(READER_SESSION_KEY.trim()));
 
-        let plaintext =
-            decrypt_reader_data(&session_key, encrypted_request.as_ref(), &mut 0).unwrap();
+        let plaintext = decrypt_reader_data(
+            GenericArray::from_slice(session_key.as_ref()),
+            encrypted_request.as_ref(),
+            &mut 0,
+        )
+        .unwrap();
         let _device_request: DeviceRequest = crate::cbor::from_slice(&plaintext).unwrap();
     }
 }

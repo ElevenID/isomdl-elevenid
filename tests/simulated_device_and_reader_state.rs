@@ -16,7 +16,7 @@ use crate::common::{Device, AGE_OVER_21_ELEMENT, DOC_TYPE, NAMESPACE};
 mod common;
 
 struct SessionData {
-    state: Arc<SessionManagerEngaged>,
+    state: SessionManagerEngaged,
     qr_code_uri: String,
 }
 
@@ -86,7 +86,7 @@ fn initialise_session(docs: Documents, uuid: Uuid) -> Result<SessionData> {
         .qr_engagement()
         .context("could not generate qr engagement")?;
     Ok(SessionData {
-        state: Arc::new(SessionManagerEngaged(engaged_state)),
+        state: SessionManagerEngaged(engaged_state),
         qr_code_uri,
     })
 }
@@ -107,7 +107,7 @@ fn establish_reader_session(qr: String) -> Result<(reader::SessionManager, Vec<u
 
 /// The Device handles the request from the reader and creates the `RequestData` context.
 fn handle_request(
-    state: Arc<SessionManagerEngaged>,
+    state: SessionManagerEngaged,
     reader_session_manager: &mut reader::SessionManager,
     request: Vec<u8>,
     key: Arc<p256::ecdsa::SigningKey>,
@@ -117,7 +117,6 @@ fn handle_request(
             cbor::from_slice(&request).context("could not deserialize request")?;
         state
             .0
-            .clone()
             .process_session_establishment(session_establishment, Default::default())
             .context("could not process process session establishment")?
     };

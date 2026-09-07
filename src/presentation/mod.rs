@@ -110,15 +110,6 @@ pub trait Stringify: Serialize + for<'a> Deserialize<'a> {
 #[cfg(feature = "session-key-agreement")]
 impl Stringify for device::Document {}
 #[cfg(feature = "session-key-agreement")]
-impl Stringify for device::SessionManagerInit {}
-#[cfg(feature = "session-key-agreement")]
-impl Stringify for device::SessionManagerEngaged {}
-#[cfg(feature = "session-key-agreement")]
-impl Stringify for device::SessionManager {}
-#[cfg(feature = "session-key-agreement")]
-impl Stringify for reader::SessionManager {}
-
-#[cfg(feature = "session-key-agreement")]
 use crate::definitions::{device_key::cose_key::CoseKey, helpers::Tag24};
 #[cfg(feature = "session-key-agreement")]
 use hkdf::Hkdf;

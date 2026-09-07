@@ -35,7 +35,8 @@ use crate::{
         helpers::{tag24, NonEmptyMap, NonEmptyVec, Tag24},
         issuer_signed::{IssuerSigned, IssuerSignedItemBytes},
         session::{
-            self, derive_session_key, get_shared_secret, Handover, SessionData, SessionTranscript,
+            self, derive_session_key, get_shared_secret, Handover, SessionData, SessionKey,
+            SessionTranscript,
         },
         x509::{
             self, trust_anchor::TrustAnchorRegistry, x5chain::X5CHAIN_COSE_HEADER_LABEL, X5Chain,
@@ -45,7 +46,6 @@ use crate::{
 };
 use coset::Label;
 use coset::{CoseMac0Builder, CoseSign1, CoseSign1Builder};
-use p256::FieldBytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use session::SessionTranscript180135;
@@ -70,10 +70,9 @@ use super::{
 ///
 /// For convenience, the [SessionManagerInit] state surfaces the [SessionManagerInit::ble_ident] method
 /// to provide the BLE identification string for the device.
-#[derive(Serialize, Deserialize)]
 pub struct SessionManagerInit {
     documents: Documents,
-    e_device_key: Vec<u8>,
+    e_device_key: p256::SecretKey,
     device_engagement: Tag24<DeviceEngagement>,
 }
 
@@ -81,10 +80,9 @@ pub struct SessionManagerInit {
 ///
 /// Transition to this state is made with [SessionManagerInit::qr_engagement].
 /// That creates the `QR code` that the reader will use to establish the session.
-#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionManagerEngaged {
     documents: Documents,
-    e_device_key: Vec<u8>,
+    e_device_key: p256::SecretKey,
     device_engagement: Tag24<DeviceEngagement>,
     handover: Handover,
 }
@@ -103,13 +101,12 @@ pub struct SessionManagerEngaged {
 ///
 /// For convience, the [SessionManagerInit] state surfaces the [SessionManagerInit::ble_ident] method
 /// to provide the BLE identification string for the device.
-#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionManager {
     documents: Documents,
     session_transcript: SessionTranscript180135,
-    sk_device: [u8; 32],
+    sk_device: SessionKey,
     device_message_counter: u32,
-    sk_reader: [u8; 32],
+    sk_reader: SessionKey,
     reader_message_counter: u32,
     state: State,
     trusted_verifiers: TrustAnchorRegistry,
@@ -268,7 +265,7 @@ impl SessionManagerInit {
 
         Ok(Self {
             documents,
-            e_device_key: e_device_key.to_bytes().to_vec(),
+            e_device_key,
             device_engagement,
         })
     }
@@ -312,14 +309,14 @@ impl SessionManagerEngaged {
         let session_transcript_bytes =
             Tag24::new(session_transcript.clone()).map_err(Error::Tag24CborEncoding)?;
 
-        let e_device_key = p256::SecretKey::from_bytes(FieldBytes::from_slice(&self.e_device_key))?;
+        let shared_secret = get_shared_secret(
+            e_reader_key.into_inner(),
+            &self.e_device_key.to_nonzero_scalar(),
+        )
+        .map_err(Error::SharedSecretGeneration)?;
 
-        let shared_secret = get_shared_secret(e_reader_key.into_inner(), &e_device_key.into())
-            .map_err(Error::SharedSecretGeneration)?;
-
-        let sk_reader = derive_session_key(&shared_secret, &session_transcript_bytes, true)?.into();
-        let sk_device =
-            derive_session_key(&shared_secret, &session_transcript_bytes, false)?.into();
+        let sk_reader = derive_session_key(&shared_secret, &session_transcript_bytes, true)?;
+        let sk_device = derive_session_key(&shared_secret, &session_transcript_bytes, false)?;
 
         let mut sm = SessionManager {
             documents: self.documents,
@@ -432,7 +429,7 @@ impl SessionManager {
             }
         };
         let decrypted_request = match session::decrypt_reader_data(
-            &self.sk_reader.into(),
+            aes::cipher::generic_array::GenericArray::from_slice(self.sk_reader.as_ref()),
             data.as_ref(),
             &mut self.reader_message_counter,
         )
@@ -526,7 +523,9 @@ impl SessionManager {
                         let mut status: Option<session::Status> = None;
                         let response_bytes = cbor::to_vec(&response)?;
                         let encrypted_response = session::encrypt_device_data(
-                            &self.sk_device.into(),
+                            aes::cipher::generic_array::GenericArray::from_slice(
+                                self.sk_device.as_ref(),
+                            ),
                             &response_bytes,
                             &mut self.device_message_counter,
                         )

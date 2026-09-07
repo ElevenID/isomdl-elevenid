@@ -37,7 +37,7 @@ use crate::{
         helpers::{non_empty_vec, NonEmptyVec, Tag24},
         session::{
             self, create_p256_ephemeral_keys, derive_session_key, get_shared_secret, Handover,
-            SessionEstablishment,
+            SessionEstablishment, SessionKey,
         },
         x509::{trust_anchor::TrustAnchorRegistry, x5chain::X5CHAIN_COSE_HEADER_LABEL, X5Chain},
         DeviceEngagement, DeviceResponse, SessionData, SessionTranscript180135,
@@ -51,12 +51,11 @@ use crate::{
 /// for handling the session with the device.
 ///
 /// The transition to this state is made by [SessionManager::establish_session].
-#[derive(Serialize, Deserialize, Clone)]
 pub struct SessionManager {
     session_transcript: SessionTranscript180135,
-    sk_device: [u8; 32],
+    sk_device: SessionKey,
     device_message_counter: u32,
-    sk_reader: [u8; 32],
+    sk_reader: SessionKey,
     reader_message_counter: u32,
     trust_anchor_registry: TrustAnchorRegistry,
 }
@@ -225,11 +224,9 @@ impl SessionManager {
 
         //derive session keys
         let sk_reader = derive_session_key(&shared_secret, &session_transcript_bytes, true)
-            .context("failed to derive reader session key")?
-            .into();
+            .context("failed to derive reader session key")?;
         let sk_device = derive_session_key(&shared_secret, &session_transcript_bytes, false)
-            .context("failed to derive device session key")?
-            .into();
+            .context("failed to derive device session key")?;
 
         let mut session_manager = Self {
             session_transcript,
@@ -306,7 +303,7 @@ impl SessionManager {
         };
         let device_request_bytes = cbor::to_vec(&device_request)?;
         session::encrypt_reader_data(
-            &self.sk_reader.into(),
+            aes::cipher::generic_array::GenericArray::from_slice(self.sk_reader.as_ref()),
             &device_request_bytes,
             &mut self.reader_message_counter,
         )
@@ -320,7 +317,7 @@ impl SessionManager {
             Some(r) => r,
         };
         let decrypted_response = session::decrypt_device_data(
-            &self.sk_device.into(),
+            aes::cipher::generic_array::GenericArray::from_slice(self.sk_device.as_ref()),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )
