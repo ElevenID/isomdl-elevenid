@@ -32,6 +32,7 @@ session-key-agreement = [
     "dep:rand",
     "p256/ecdh",
     "p384/ecdh",
+    "dep:zeroize",
 ]
 cli = ["session-key-agreement", "dep:clap", "dep:clap-stdin"]
 parallel = ["issuer-planning", "dep:rayon"]
@@ -61,8 +62,9 @@ thiserror = "1.0"
 elliptic-curve = "0.13.1"
 hkdf = { version = "0.12.3", optional = true }
 aes-gcm = { version = "0.10.1", optional = true }
-hmac = { version = "0.12.1", optional = true }
+hmac = { version = "0.12.1", features = ["reset"], optional = true }
 aes = { version = "0.8.2", optional = true }
+zeroize = { version = "1.8", features = ["alloc"], optional = true }
 sec1 = "0.7.1"
 uuid = { version = "1.3", features = ["v1", "v4", "std", "rng", "serde", "js"] }
 time = { version = "0.3.20", features = ["formatting", "parsing", "macros"] }

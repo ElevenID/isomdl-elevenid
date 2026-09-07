@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::authentication::ResponseAuthenticationOutcome;
 use super::reader_utils::validate_response;
@@ -51,12 +52,11 @@ use crate::{
 /// for handling the session with the device.
 ///
 /// The transition to this state is made by [SessionManager::establish_session].
-#[derive(Serialize, Deserialize, Clone)]
 pub struct SessionManager {
     session_transcript: SessionTranscript180135,
-    sk_device: [u8; 32],
+    sk_device: Zeroizing<[u8; 32]>,
     device_message_counter: u32,
-    sk_reader: [u8; 32],
+    sk_reader: Zeroizing<[u8; 32]>,
     reader_message_counter: u32,
     trust_anchor_registry: TrustAnchorRegistry,
 }
@@ -233,9 +233,9 @@ impl SessionManager {
 
         let mut session_manager = Self {
             session_transcript,
-            sk_device,
+            sk_device: Zeroizing::new(sk_device),
             device_message_counter: 0,
-            sk_reader,
+            sk_reader: Zeroizing::new(sk_reader),
             reader_message_counter: 0,
             trust_anchor_registry,
         };
@@ -306,7 +306,7 @@ impl SessionManager {
         };
         let device_request_bytes = cbor::to_vec(&device_request)?;
         session::encrypt_reader_data(
-            &self.sk_reader.into(),
+            &(*self.sk_reader).into(),
             &device_request_bytes,
             &mut self.reader_message_counter,
         )
@@ -320,7 +320,7 @@ impl SessionManager {
             Some(r) => r,
         };
         let decrypted_response = session::decrypt_device_data(
-            &self.sk_device.into(),
+            &(*self.sk_device).into(),
             encrypted_response.as_ref(),
             &mut self.device_message_counter,
         )

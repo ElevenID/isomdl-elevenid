@@ -52,6 +52,7 @@ use session::SessionTranscript180135;
 use std::collections::BTreeMap;
 use std::num::ParseIntError;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::{
     authentication::{AuthenticationStatus, RequestAuthenticationOutcome},
@@ -70,10 +71,9 @@ use super::{
 ///
 /// For convenience, the [SessionManagerInit] state surfaces the [SessionManagerInit::ble_ident] method
 /// to provide the BLE identification string for the device.
-#[derive(Serialize, Deserialize)]
 pub struct SessionManagerInit {
     documents: Documents,
-    e_device_key: Vec<u8>,
+    e_device_key: Zeroizing<Vec<u8>>,
     device_engagement: Tag24<DeviceEngagement>,
 }
 
@@ -81,10 +81,9 @@ pub struct SessionManagerInit {
 ///
 /// Transition to this state is made with [SessionManagerInit::qr_engagement].
 /// That creates the `QR code` that the reader will use to establish the session.
-#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionManagerEngaged {
     documents: Documents,
-    e_device_key: Vec<u8>,
+    e_device_key: Zeroizing<Vec<u8>>,
     device_engagement: Tag24<DeviceEngagement>,
     handover: Handover,
 }
@@ -103,13 +102,12 @@ pub struct SessionManagerEngaged {
 ///
 /// For convience, the [SessionManagerInit] state surfaces the [SessionManagerInit::ble_ident] method
 /// to provide the BLE identification string for the device.
-#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionManager {
     documents: Documents,
     session_transcript: SessionTranscript180135,
-    sk_device: [u8; 32],
+    sk_device: Zeroizing<[u8; 32]>,
     device_message_counter: u32,
-    sk_reader: [u8; 32],
+    sk_reader: Zeroizing<[u8; 32]>,
     reader_message_counter: u32,
     state: State,
     trusted_verifiers: TrustAnchorRegistry,
@@ -268,7 +266,7 @@ impl SessionManagerInit {
 
         Ok(Self {
             documents,
-            e_device_key: e_device_key.to_bytes().to_vec(),
+            e_device_key: Zeroizing::new(e_device_key.to_bytes().to_vec()),
             device_engagement,
         })
     }
@@ -317,9 +315,12 @@ impl SessionManagerEngaged {
         let shared_secret = get_shared_secret(e_reader_key.into_inner(), &e_device_key.into())
             .map_err(Error::SharedSecretGeneration)?;
 
-        let sk_reader = derive_session_key(&shared_secret, &session_transcript_bytes, true)?.into();
-        let sk_device =
-            derive_session_key(&shared_secret, &session_transcript_bytes, false)?.into();
+        let sk_reader = Zeroizing::new(
+            derive_session_key(&shared_secret, &session_transcript_bytes, true)?.into(),
+        );
+        let sk_device = Zeroizing::new(
+            derive_session_key(&shared_secret, &session_transcript_bytes, false)?.into(),
+        );
 
         let mut sm = SessionManager {
             documents: self.documents,
@@ -432,7 +433,7 @@ impl SessionManager {
             }
         };
         let decrypted_request = match session::decrypt_reader_data(
-            &self.sk_reader.into(),
+            &(*self.sk_reader).into(),
             data.as_ref(),
             &mut self.reader_message_counter,
         )
@@ -526,7 +527,7 @@ impl SessionManager {
                         let mut status: Option<session::Status> = None;
                         let response_bytes = cbor::to_vec(&response)?;
                         let encrypted_response = session::encrypt_device_data(
-                            &self.sk_device.into(),
+                            &(*self.sk_device).into(),
                             &response_bytes,
                             &mut self.device_message_counter,
                         )

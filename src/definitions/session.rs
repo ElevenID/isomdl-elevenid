@@ -263,7 +263,7 @@ fn encrypt(
     message_count: &mut u32,
     reader: bool,
 ) -> Result<Vec<u8>, aes_gcm::Error> {
-    let initialization_vector = get_initialization_vector(message_count, reader);
+    let initialization_vector = get_initialization_vector(message_count, reader)?;
     let nonce = Nonce::from(initialization_vector);
     Aes256Gcm::new(session_key).encrypt(&nonce, plaintext)
 }
@@ -293,14 +293,17 @@ fn decrypt(
     message_count: &mut u32,
     reader: bool,
 ) -> Result<Vec<u8>, aes_gcm::Error> {
-    let initialization_vector = get_initialization_vector(message_count, reader);
+    let initialization_vector = get_initialization_vector(message_count, reader)?;
     let nonce = Nonce::from(initialization_vector);
     Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext)
 }
 
 #[cfg(feature = "session-key-agreement")]
-pub fn get_initialization_vector(message_count: &mut u32, reader: bool) -> [u8; 12] {
-    *message_count += 1;
+pub fn get_initialization_vector(
+    message_count: &mut u32,
+    reader: bool,
+) -> Result<[u8; 12], aes_gcm::Error> {
+    *message_count = message_count.checked_add(1).ok_or(aes_gcm::Error)?;
     let counter = GenericArray::from(message_count.to_be_bytes());
     let identifier = if reader {
         GenericArray::from([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
@@ -308,7 +311,7 @@ pub fn get_initialization_vector(message_count: &mut u32, reader: bool) -> [u8; 
         GenericArray::from([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8])
     };
 
-    identifier.concat(counter).into()
+    Ok(identifier.concat(counter).into())
 }
 
 #[cfg(all(test, feature = "session-key-agreement"))]
@@ -317,6 +320,14 @@ mod test {
     use crate::cbor;
     use crate::definitions::device_engagement::Security;
     use crate::definitions::device_request::DeviceRequest;
+
+    #[test]
+    fn initialization_vector_fails_closed_at_counter_exhaustion() {
+        let mut counter = u32::MAX;
+
+        assert!(get_initialization_vector(&mut counter, true).is_err());
+        assert_eq!(counter, u32::MAX);
+    }
 
     #[test]
     fn qr_handover() {
