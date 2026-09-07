@@ -4,20 +4,20 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-#[cfg(feature = "issuer-local-signing")]
+#[cfg(test)]
 use async_signature::AsyncSigner;
 use coset::iana::Algorithm;
 use coset::{CoseSign1, Label};
 use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "issuer-local-signing")]
+#[cfg(test)]
 use signature::{SignatureEncoding, Signer};
 
 use crate::cose::sign1::PreparedCoseSign1;
 use crate::cose::MaybeTagged;
-#[cfg(feature = "issuer-local-signing")]
+#[cfg(test)]
 use crate::cose::SignatureAlgorithm;
-#[cfg(all(test, feature = "issuer-local-signing"))]
+#[cfg(test)]
 use crate::digest_executor::SerialDigestExecutor;
 use crate::digest_executor::{
     digest_length, DefaultDigestExecutor, DigestExecutor, DigestJob, DigestResult,
@@ -464,7 +464,7 @@ impl Mdoc {
     }
 
     /// Directly sign and issue an mdoc.
-    #[cfg(feature = "issuer-local-signing")]
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn issue<S, Sig>(
         doc_type: String,
@@ -500,7 +500,7 @@ impl Mdoc {
     }
 
     /// Directly sign and issue an mdoc.
-    #[cfg(feature = "issuer-local-signing")]
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn issue_async<S, Sig>(
         doc_type: String,
@@ -682,7 +682,7 @@ impl Builder {
     }
 
     /// Directly issue an mdoc.
-    #[cfg(feature = "issuer-local-signing")]
+    #[cfg(test)]
     pub fn issue<S, Sig>(self, x5chain: X5Chain, signer: S) -> Result<Mdoc>
     where
         S: Signer<Sig> + SignatureAlgorithm,
@@ -718,7 +718,7 @@ impl Builder {
     }
 
     /// Directly issue an mdoc.
-    #[cfg(feature = "issuer-local-signing")]
+    #[cfg(test)]
     pub async fn issue_async<S, Sig>(self, x5chain: X5Chain, signer: S) -> Result<Mdoc>
     where
         S: AsyncSigner<Sig> + SignatureAlgorithm,
@@ -1238,7 +1238,7 @@ where
     digest_id
 }
 
-#[cfg(all(test, feature = "issuer-local-signing"))]
+#[cfg(test)]
 pub mod test {
     use elliptic_curve::sec1::ToEncodedPoint;
     use p256::ecdsa::{Signature, SigningKey};
