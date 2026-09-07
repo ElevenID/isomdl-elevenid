@@ -1,14 +1,110 @@
-use ::hmac::Hmac;
 use coset::cwt::ClaimsSet;
 use coset::{
-    mac_structure_data, CborSerializable, CoseError, CoseMac0, MacContext,
+    iana, mac_structure_data, CborSerializable, CoseError, CoseMac0, MacContext,
     RegisteredLabelWithPrivate,
 };
-use digest::{Mac, MacError};
+use digest::MacError;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::cose::{MaybeTagged, SignatureAlgorithm};
+use crate::cose::MaybeTagged;
+use crate::definitions::session_crypto::{hmac_sha256_with_scratch, HmacSha256Scratch};
+
+/// An opaque HMAC-SHA-256 key whose owned bytes are erased on drop.
+pub struct HmacSha256Key {
+    key: SecretMacKey,
+}
+
+struct SecretMacKey {
+    bytes: Vec<u8>,
+    #[cfg(test)]
+    cleanup_observer: Option<MacKeyCleanupObserver>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct MacKeyCleanupObserver(std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+#[cfg(test)]
+impl MacKeyCleanupObserver {
+    fn snapshots(&self) -> Vec<Vec<u8>> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl Drop for SecretMacKey {
+    fn drop(&mut self) {
+        self.bytes.resize(self.bytes.capacity(), 0);
+        self.bytes.fill(0);
+        #[cfg(test)]
+        if let Some(observer) = &self.cleanup_observer {
+            observer.0.lock().unwrap().push(self.bytes.clone());
+        }
+        self.bytes.zeroize();
+    }
+}
+
+impl std::fmt::Debug for HmacSha256Key {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("HmacSha256Key")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
+impl HmacSha256Key {
+    /// Copy key material into a redacted, zeroizing HMAC key wrapper.
+    pub fn new(key: &[u8]) -> Self {
+        Self {
+            key: SecretMacKey {
+                bytes: key.to_vec(),
+                #[cfg(test)]
+                cleanup_observer: None,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_cleanup_observer(key: &[u8], observer: MacKeyCleanupObserver) -> Self {
+        Self {
+            key: SecretMacKey {
+                bytes: key.to_vec(),
+                cleanup_observer: Some(observer),
+            },
+        }
+    }
+
+    /// Compute a full-length HMAC-SHA-256 tag.
+    pub fn tag(&self, payload: &[u8]) -> Vec<u8> {
+        let mut output = Zeroizing::new([0u8; 32]);
+        let mut scratch = HmacSha256Scratch::default();
+        hmac_sha256_with_scratch(
+            &self.key.bytes,
+            &[payload],
+            &mut output,
+            &mut scratch,
+            || Ok(()),
+        )
+        .expect("fixed-size HMAC-SHA-256 computation cannot fail");
+        output.to_vec()
+    }
+
+    fn verify_payload(&self, payload: &[u8], tag: &[u8]) -> bool {
+        let mut output = Zeroizing::new([0u8; 32]);
+        let mut scratch = HmacSha256Scratch::default();
+        hmac_sha256_with_scratch(
+            &self.key.bytes,
+            &[payload],
+            &mut output,
+            &mut scratch,
+            || Ok(()),
+        )
+        .expect("fixed-size HMAC-SHA-256 computation cannot fail");
+        tag.len() == output.len() && bool::from(output.as_slice().ct_eq(tag))
+    }
+}
 
 /// Prepared `COSE_Mac0` for remote signing.
 ///
@@ -23,13 +119,11 @@ use crate::cose::{MaybeTagged, SignatureAlgorithm};
 /// Example:
 /// ```
 /// use coset::iana;
-/// use digest::Mac;
-/// use hex::FromHex;use hmac::Hmac;
-/// use sha2::Sha256;
-/// use isomdl::cose::mac0::PreparedCoseMac0;
+/// use hex::FromHex;
+/// use isomdl::cose::mac0::{HmacSha256Key, PreparedCoseMac0};
 ///
 /// let key = Vec::<u8>::from_hex("a361316953796d6d6574726963613305622d318f187418681869187318201869187318201874186818651820186b18651879").unwrap();
-/// let signer = Hmac::<Sha256>::new_from_slice(&key).expect("failed to create HMAC signer");
+/// let signer = HmacSha256Key::new(&key);
 /// let protected = coset::HeaderBuilder::new()
 ///     .algorithm(iana::Algorithm::HMAC_256_256)
 ///     .build();
@@ -40,14 +134,8 @@ use crate::cose::{MaybeTagged, SignatureAlgorithm};
 ///     .payload(b"This is the content.".to_vec());
 /// let prepared = PreparedCoseMac0::new(builder, None, None, true).unwrap();
 /// let signature_payload = prepared.signature_payload();
-/// let signature = tag(signature_payload, &signer).unwrap();
+/// let signature = signer.tag(signature_payload);
 /// let cose_mac0 = prepared.finalize(signature);
-/// fn tag(signature_payload: &[u8], s: &Hmac<Sha256>) -> anyhow::Result<Vec<u8>> {
-///     let mut mac = s.clone();
-///     mac.reset();
-///     mac.update(signature_payload);
-///     Ok(mac.finalize().into_bytes().to_vec())
-///  }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedCoseMac0 {
     cose_mac0: MaybeTagged<CoseMac0>,
@@ -159,14 +247,14 @@ impl MaybeTagged<CoseMac0> {
     /// Verify that the tag of a `COSE_Mac0` is authentic.
     pub fn verify(
         &self,
-        verifier: &Hmac<Sha256>,
+        verifier: &HmacSha256Key,
         detached_payload: Option<&[u8]>,
         external_aad: Option<&[u8]>,
     ) -> VerificationResult {
         if let Some(RegisteredLabelWithPrivate::Assigned(alg)) =
             self.inner.protected.header.alg.as_ref()
         {
-            if verifier.algorithm() != *alg {
+            if iana::Algorithm::HMAC_256_256 != *alg {
                 return VerificationResult::Failure(
                     "algorithm in protected headers did not match verifier's algorithm".into(),
                 );
@@ -190,12 +278,10 @@ impl MaybeTagged<CoseMac0> {
             payload,
         );
 
-        let mut mac = verifier.clone();
-        mac.reset();
-        mac.update(&tag_payload);
-        match mac.verify_slice(tag) {
-            Ok(()) => VerificationResult::Success,
-            Err(e) => VerificationResult::Failure(format!("tag is not authentic: {e}")),
+        if verifier.verify_payload(&tag_payload, tag) {
+            VerificationResult::Success
+        } else {
+            VerificationResult::Failure("tag is not authentic".into())
         }
     }
 
@@ -211,37 +297,76 @@ impl MaybeTagged<CoseMac0> {
     }
 }
 
-mod hmac {
-    use coset::iana;
-    use hmac::Hmac;
-    use sha2::Sha256;
-
-    use super::super::SignatureAlgorithm;
-
-    impl SignatureAlgorithm for Hmac<Sha256> {
-        fn algorithm(&self) -> iana::Algorithm {
-            iana::Algorithm::HMAC_256_256
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::cbor;
-    use crate::cose::mac0::{CoseMac0, PreparedCoseMac0};
+    use crate::cose::mac0::{CoseMac0, HmacSha256Key, MacKeyCleanupObserver, PreparedCoseMac0};
     use crate::cose::MaybeTagged;
+    use crate::definitions::session_crypto::{hmac_sha256_with_scratch, HmacSha256Scratch};
     use coset::cwt::{ClaimsSet, Timestamp};
     use coset::{iana, CborSerializable, Header};
-    use digest::Mac;
     use hex::FromHex;
-    use hmac::Hmac;
-    use sha2::Sha256;
+    use zeroize::Zeroizing;
 
     static COSE_MAC0: &str = include_str!("../../test/definitions/cose/mac0/serialized.cbor");
     static KEY: &str = include_str!("../../test/definitions/cose/mac0/secret_key");
 
     const RFC8392_KEY: &str = "6c1382765aec5358f117733d281c1c7bdc39884d04a45a1e6c67c858bc206c19";
     const RFC8392_MAC0: &str = "d18443a10126a104524173796d6d657472696345434453413235365850a70175636f61703a2f2f61732e6578616d706c652e636f6d02656572696b77037818636f61703a2f2f6c696768742e6578616d706c652e636f6d041a5612aeb0051a5610d9f0061a5610d9f007420b715820a377dfe17a3c3c3bdb363c426f85d3c1a1f11007765965017602f207700071b0";
+
+    #[test]
+    fn hmac_sha256_key_matches_rfc4231_and_wipes_key_and_scratch() {
+        let observer = MacKeyCleanupObserver::default();
+        let key = HmacSha256Key::new_with_cleanup_observer(&[0x0b; 20], observer.clone());
+        assert_eq!(
+            hex::encode(key.tag(b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+
+        let mut output = Zeroizing::new([0u8; 32]);
+        let mut scratch = HmacSha256Scratch::default();
+        hmac_sha256_with_scratch(
+            &key.key.bytes,
+            &[b"Hi There"],
+            &mut output,
+            &mut scratch,
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(scratch.is_zero());
+
+        output.fill(0xa5);
+        assert!(hmac_sha256_with_scratch(
+            &key.key.bytes,
+            &[b"forced error"],
+            &mut output,
+            &mut scratch,
+            || Err(())
+        )
+        .is_err());
+        assert_eq!(&*output, &[0; 32]);
+        assert!(scratch.is_zero());
+
+        output.fill(0xa5);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = hmac_sha256_with_scratch(
+                &key.key.bytes,
+                &[b"forced unwind"],
+                &mut output,
+                &mut scratch,
+                || panic!("injected HMAC unwind after computation"),
+            );
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(&*output, &[0; 32]);
+        assert!(scratch.is_zero());
+
+        drop(key);
+        let snapshots = observer.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert!(!snapshots[0].is_empty());
+        assert!(snapshots[0].iter().all(|byte| *byte == 0));
+    }
 
     #[test]
     fn roundtrip() {
@@ -258,7 +383,7 @@ mod tests {
     #[test]
     fn tagging() {
         let key = Vec::<u8>::from_hex(KEY).unwrap();
-        let signer = Hmac::<Sha256>::new_from_slice(&key).expect("failed to create HMAC signer");
+        let signer = HmacSha256Key::new(&key);
         let protected = coset::HeaderBuilder::new()
             .algorithm(iana::Algorithm::HMAC_256_256)
             .build();
@@ -269,7 +394,7 @@ mod tests {
             .payload(b"This is the content.".to_vec());
         let prepared = PreparedCoseMac0::new(builder, None, None, false).unwrap();
         let signature_payload = prepared.signature_payload();
-        let signature = tag(signature_payload, &signer).unwrap();
+        let signature = signer.tag(signature_payload);
         let cose_mac0 = prepared.finalize(signature);
         let serialized = cbor::to_vec(&cose_mac0).expect("failed to serialize COSE_MAC0");
 
@@ -280,18 +405,10 @@ mod tests {
         );
     }
 
-    fn tag(signature_payload: &[u8], s: &Hmac<Sha256>) -> anyhow::Result<Vec<u8>> {
-        let mut mac = s.clone();
-        mac.reset();
-        mac.update(signature_payload);
-        Ok(mac.finalize().into_bytes().to_vec())
-    }
-
     #[test]
     fn verifying() {
         let key = Vec::<u8>::from_hex(KEY).unwrap();
-        let verifier =
-            Hmac::<Sha256>::new_from_slice(&key).expect("failed to create HMAC verifier");
+        let verifier = HmacSha256Key::new(&key);
 
         let cose_mac0_bytes = Vec::<u8>::from_hex(COSE_MAC0).unwrap();
         let cose_mac0: MaybeTagged<CoseMac0> =
@@ -300,13 +417,17 @@ mod tests {
         cose_mac0
             .verify(&verifier, None, None)
             .into_result()
-            .expect("COSE_MAC0 could not be verified")
+            .expect("COSE_MAC0 could not be verified");
+
+        let mut forged = cose_mac0.clone();
+        forged.inner.tag[0] ^= 1;
+        assert!(!forged.verify(&verifier, None, None).is_success());
     }
 
     #[test]
     fn remote_tagging() {
         let key = Vec::<u8>::from_hex(KEY).unwrap();
-        let signer = Hmac::<Sha256>::new_from_slice(&key).expect("failed to create HMAC signer");
+        let signer = HmacSha256Key::new(&key);
         let protected = coset::HeaderBuilder::new()
             .algorithm(iana::Algorithm::HMAC_256_256)
             .build();
@@ -317,7 +438,7 @@ mod tests {
             .payload(b"This is the content.".to_vec());
         let prepared = PreparedCoseMac0::new(builder, None, None, false).unwrap();
         let signature_payload = prepared.signature_payload();
-        let signature = tag(signature_payload, &signer).unwrap();
+        let signature = signer.tag(signature_payload);
         let cose_mac0 = prepared.finalize(signature);
 
         let serialized = cbor::to_vec(&cose_mac0).expect("failed to serialize COSE_MAC0");
@@ -327,8 +448,7 @@ mod tests {
             "expected COSE_MAC0 and signed data do not match"
         );
 
-        let verifier =
-            Hmac::<Sha256>::new_from_slice(&key).expect("failed to create HMAC verifier");
+        let verifier = HmacSha256Key::new(&key);
         cose_mac0
             .verify(&verifier, None, None)
             .into_result()
@@ -364,7 +484,7 @@ mod tests {
     fn tagging_cwt() {
         // Using key from RFC8392 example
         let key = hex::decode(RFC8392_KEY).unwrap();
-        let signer = Hmac::<Sha256>::new_from_slice(&key).expect("failed to create HMAC signer");
+        let signer = HmacSha256Key::new(&key);
         let (protected, unprotected, claims_set) = rfc8392_example_inputs();
         let builder = coset::CoseMac0Builder::new()
             .protected(protected)
@@ -372,7 +492,7 @@ mod tests {
             .payload(claims_set.to_vec().expect("failed to set claims set"));
         let prepared = PreparedCoseMac0::new(builder, None, None, true).unwrap();
         let signature_payload = prepared.signature_payload();
-        let signature = tag(signature_payload, &signer).expect("failed to sign CWT");
+        let signature = signer.tag(signature_payload);
         let cose_mac0 = prepared.finalize(signature);
         let serialized = cbor::to_vec(&cose_mac0).expect("failed to serialize COSE_MAC0");
         let expected = hex::decode(RFC8392_MAC0).unwrap();
