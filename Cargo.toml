@@ -9,9 +9,10 @@ repository = "https://github.com/spruceid/isomdl"
 documentation = "https://docs.rs/isomdl"
 license = "Apache-2.0 OR MIT"
 exclude = ["test/"]
+autotests = false
 
 [features]
-default = ["issuer-planning", "issuer-local-signing", "presentation-verifier", "session-key-agreement", "cli"]
+default = ["presentation-verifier"]
 issuer-planning = ["dep:p521", "dep:rand"]
 issuer-local-signing = [
     "issuer-planning",
@@ -106,10 +107,25 @@ wide = { version = "=0.7.33", default-features = false, optional = true }
 criterion = { version = "0.7", default-features = false }
 hex = "0.4.3"
 p256 = "0.13.0"
+rand = "0.8.5"
 rstest = "0.23.0"
 serde_json = "1.0.145"
 test-log = { version = "0.2.16", features = ["trace"] }
 x509-cert = { version = "0.2.4", features = ["pem", "builder", "hazmat"] }
+
+[[test]]
+name = "namespace"
+path = "tests/namespace.rs"
+
+[[test]]
+name = "simulated_device_and_reader"
+path = "tests/simulated_device_and_reader.rs"
+required-features = ["session-key-agreement"]
+
+[[test]]
+name = "simulated_device_and_reader_state"
+path = "tests/simulated_device_and_reader_state.rs"
+required-features = ["session-key-agreement"]
 
 [[bench]]
 name = "mdoc_prepare"
