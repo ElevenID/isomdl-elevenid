@@ -15,23 +15,28 @@ use crate::definitions::helpers::bytestr::ByteStr;
 use crate::definitions::session::EncodedPoints::{Ep256, Ep384};
 
 #[cfg(feature = "session-key-agreement")]
-use aes::cipher::{generic_array::GenericArray, typenum::U32};
-#[cfg(feature = "session-key-agreement")]
+use crate::definitions::session_crypto::{hkdf_sha256_32_with_scratch, HkdfScratch, SecureSha256};
+#[cfg(all(feature = "session-key-agreement", target_family = "wasm"))]
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{AeadInPlace, KeyInit},
     Aes256Gcm,
     Nonce, // Or `Aes128Gcm`
 };
 use anyhow::Result;
+#[cfg(all(feature = "session-key-agreement", not(target_family = "wasm")))]
+use aws_lc_rs::aead::{
+    Aad as AwsAad, LessSafeKey as AwsLessSafeKey, Nonce as AwsNonce, UnboundKey as AwsUnboundKey,
+    AES_256_GCM,
+};
 #[cfg(feature = "session-key-agreement")]
 use ecdsa::EncodedPoint;
 #[cfg(feature = "session-key-agreement")]
 use elliptic_curve::{
-    ecdh::EphemeralSecret, ecdh::SharedSecret, generic_array::sequence::Concat,
+    ecdh::EphemeralSecret,
+    ecdh::SharedSecret,
+    generic_array::{sequence::Concat, typenum::U32, GenericArray},
     sec1::FromEncodedPoint,
 };
-#[cfg(feature = "session-key-agreement")]
-use hkdf::Hkdf;
 #[cfg(feature = "session-key-agreement")]
 use p256::NistP256;
 #[cfg(feature = "session-key-agreement")]
@@ -40,9 +45,7 @@ use p384::NistP384;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "session-key-agreement")]
-use sha2::{Digest, Sha256};
-#[cfg(feature = "session-key-agreement")]
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub type EReaderKey = CoseKey;
 pub type EDeviceKey = CoseKey;
@@ -70,6 +73,326 @@ impl std::fmt::Debug for SessionKey {
             .field(&"[REDACTED]")
             .finish()
     }
+}
+
+#[cfg(all(feature = "session-key-agreement", not(target_family = "wasm")))]
+struct NativeSessionAeadKey {
+    key: Option<AwsLessSafeKey>,
+    #[cfg(test)]
+    cleanup_observer: Option<NativeAeadCleanupObserver>,
+}
+
+#[cfg(all(test, feature = "session-key-agreement", not(target_family = "wasm")))]
+#[derive(Clone, Default)]
+struct NativeAeadCleanupObserver {
+    key_drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    buffers: AeadBufferCleanupObserver,
+}
+
+#[cfg(all(test, feature = "session-key-agreement", not(target_family = "wasm")))]
+impl NativeAeadCleanupObserver {
+    fn key_drop_count(&self) -> usize {
+        self.key_drops.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn wiped_buffers(&self) -> Vec<Vec<u8>> {
+        self.buffers.snapshots()
+    }
+}
+
+#[cfg(all(test, feature = "session-key-agreement"))]
+#[derive(Clone, Default)]
+struct AeadBufferCleanupObserver(std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+#[cfg(all(test, feature = "session-key-agreement"))]
+impl AeadBufferCleanupObserver {
+    fn snapshots(&self) -> Vec<Vec<u8>> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[cfg(feature = "session-key-agreement")]
+struct SensitiveAeadBuffer {
+    bytes: Vec<u8>,
+    #[cfg(test)]
+    cleanup_observer: Option<AeadBufferCleanupObserver>,
+}
+
+#[cfg(feature = "session-key-agreement")]
+impl SensitiveAeadBuffer {
+    fn copied_from(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+            #[cfg(test)]
+            cleanup_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn copied_from_with_observer(bytes: &[u8], observer: AeadBufferCleanupObserver) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+            cleanup_observer: Some(observer),
+        }
+    }
+
+    fn into_vec(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+#[cfg(feature = "session-key-agreement")]
+impl Drop for SensitiveAeadBuffer {
+    fn drop(&mut self) {
+        // Wipe initialized bytes and spare capacity, since the backend may have
+        // written plaintext beyond the resulting logical length before failing.
+        self.bytes.resize(self.bytes.capacity(), 0);
+        self.bytes.fill(0);
+        #[cfg(test)]
+        if let Some(observer) = &self.cleanup_observer {
+            observer.0.lock().unwrap().push(self.bytes.clone());
+        }
+        self.bytes.zeroize();
+    }
+}
+
+#[cfg(all(feature = "session-key-agreement", not(target_family = "wasm")))]
+impl NativeSessionAeadKey {
+    fn new(key_bytes: &[u8]) -> Result<Self, aes_gcm::Error> {
+        let key = AwsUnboundKey::new(&AES_256_GCM, key_bytes)
+            .map(AwsLessSafeKey::new)
+            .map_err(|_| aes_gcm::Error)?;
+        Ok(Self {
+            key: Some(key),
+            #[cfg(test)]
+            cleanup_observer: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn new_with_cleanup_observer(
+        key_bytes: &[u8],
+        observer: NativeAeadCleanupObserver,
+    ) -> Result<Self, aes_gcm::Error> {
+        let mut key = Self::new(key_bytes)?;
+        key.cleanup_observer = Some(observer);
+        Ok(key)
+    }
+
+    fn seal(&self, nonce: [u8; 12], plaintext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        self.seal_with_post_copy(nonce, plaintext, |_| Ok(()))
+    }
+
+    fn seal_with_post_copy<F>(
+        &self,
+        nonce: [u8; 12],
+        plaintext: &[u8],
+        post_copy: F,
+    ) -> Result<Vec<u8>, aes_gcm::Error>
+    where
+        F: FnOnce(&mut [u8]) -> Result<(), aes_gcm::Error>,
+    {
+        #[cfg(not(test))]
+        let mut output = SensitiveAeadBuffer::copied_from(plaintext);
+        #[cfg(test)]
+        let mut output = match &self.cleanup_observer {
+            Some(observer) => {
+                SensitiveAeadBuffer::copied_from_with_observer(plaintext, observer.buffers.clone())
+            }
+            None => SensitiveAeadBuffer::copied_from(plaintext),
+        };
+        post_copy(&mut output.bytes)?;
+        self.key
+            .as_ref()
+            .expect("native AEAD key must exist before drop")
+            .seal_in_place_append_tag(
+                AwsNonce::assume_unique_for_key(nonce),
+                AwsAad::empty(),
+                &mut output.bytes,
+            )
+            .map_err(|_| aes_gcm::Error)?;
+        Ok(output.into_vec())
+    }
+
+    fn open(&self, nonce: [u8; 12], ciphertext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        #[cfg(not(test))]
+        let mut output = SensitiveAeadBuffer::copied_from(ciphertext);
+        #[cfg(test)]
+        let mut output = match &self.cleanup_observer {
+            Some(observer) => {
+                SensitiveAeadBuffer::copied_from_with_observer(ciphertext, observer.buffers.clone())
+            }
+            None => SensitiveAeadBuffer::copied_from(ciphertext),
+        };
+        let plaintext_len = self
+            .key
+            .as_ref()
+            .expect("native AEAD key must exist before drop")
+            .open_in_place(
+                AwsNonce::assume_unique_for_key(nonce),
+                AwsAad::empty(),
+                &mut output.bytes,
+            )
+            .map_err(|_| aes_gcm::Error)?
+            .len();
+        output.bytes.truncate(plaintext_len);
+        Ok(output.into_vec())
+    }
+}
+
+#[cfg(all(feature = "session-key-agreement", not(target_family = "wasm")))]
+impl Drop for NativeSessionAeadKey {
+    fn drop(&mut self) {
+        self.key = None;
+        #[cfg(test)]
+        if let Some(observer) = &self.cleanup_observer {
+            observer
+                .key_drops
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(all(feature = "session-key-agreement", not(target_family = "wasm")))]
+fn encrypt_with_backend(
+    session_key: &GenericArray<u8, U32>,
+    nonce: [u8; 12],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, aes_gcm::Error> {
+    NativeSessionAeadKey::new(session_key)?.seal(nonce, plaintext)
+}
+
+#[cfg(all(feature = "session-key-agreement", not(target_family = "wasm")))]
+fn decrypt_with_backend(
+    session_key: &GenericArray<u8, U32>,
+    nonce: [u8; 12],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, aes_gcm::Error> {
+    NativeSessionAeadKey::new(session_key)?.open(nonce, ciphertext)
+}
+
+#[cfg(all(feature = "session-key-agreement", target_family = "wasm"))]
+struct WasmSessionAeadKey {
+    key: Option<Aes256Gcm>,
+    #[cfg(test)]
+    cleanup_observer: Option<WasmAeadCleanupObserver>,
+}
+
+// `wasm32-unknown-unknown` uses aborting panics in the supported build, so a
+// panic terminates the instance and cannot run Rust destructors. All returned
+// error paths are guarded and wiped; native unwind paths are exercised above.
+
+#[cfg(all(test, feature = "session-key-agreement", target_family = "wasm"))]
+#[derive(Clone, Default)]
+struct WasmAeadCleanupObserver {
+    key_drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    buffers: AeadBufferCleanupObserver,
+}
+
+#[cfg(all(test, feature = "session-key-agreement", target_family = "wasm"))]
+impl WasmAeadCleanupObserver {
+    fn key_drop_count(&self) -> usize {
+        self.key_drops.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(all(feature = "session-key-agreement", target_family = "wasm"))]
+impl WasmSessionAeadKey {
+    fn new(key_bytes: &GenericArray<u8, U32>) -> Self {
+        Self {
+            key: Some(Aes256Gcm::new(key_bytes)),
+            #[cfg(test)]
+            cleanup_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_cleanup_observer(
+        key_bytes: &GenericArray<u8, U32>,
+        observer: WasmAeadCleanupObserver,
+    ) -> Self {
+        let mut key = Self::new(key_bytes);
+        key.cleanup_observer = Some(observer);
+        key
+    }
+
+    fn seal(&self, nonce: [u8; 12], plaintext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        self.seal_with_post_copy(nonce, plaintext, |_| Ok(()))
+    }
+
+    fn seal_with_post_copy<F>(
+        &self,
+        nonce: [u8; 12],
+        plaintext: &[u8],
+        post_copy: F,
+    ) -> Result<Vec<u8>, aes_gcm::Error>
+    where
+        F: FnOnce(&mut [u8]) -> Result<(), aes_gcm::Error>,
+    {
+        #[cfg(not(test))]
+        let mut output = SensitiveAeadBuffer::copied_from(plaintext);
+        #[cfg(test)]
+        let mut output = match &self.cleanup_observer {
+            Some(observer) => {
+                SensitiveAeadBuffer::copied_from_with_observer(plaintext, observer.buffers.clone())
+            }
+            None => SensitiveAeadBuffer::copied_from(plaintext),
+        };
+        post_copy(&mut output.bytes)?;
+        self.key
+            .as_ref()
+            .expect("WASM AEAD key must exist before drop")
+            .encrypt_in_place(&Nonce::from(nonce), b"", &mut output.bytes)?;
+        Ok(output.into_vec())
+    }
+
+    fn open(&self, nonce: [u8; 12], ciphertext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        #[cfg(not(test))]
+        let mut output = SensitiveAeadBuffer::copied_from(ciphertext);
+        #[cfg(test)]
+        let mut output = match &self.cleanup_observer {
+            Some(observer) => {
+                SensitiveAeadBuffer::copied_from_with_observer(ciphertext, observer.buffers.clone())
+            }
+            None => SensitiveAeadBuffer::copied_from(ciphertext),
+        };
+        self.key
+            .as_ref()
+            .expect("WASM AEAD key must exist before drop")
+            .decrypt_in_place(&Nonce::from(nonce), b"", &mut output.bytes)?;
+        Ok(output.into_vec())
+    }
+}
+
+#[cfg(all(feature = "session-key-agreement", target_family = "wasm"))]
+impl Drop for WasmSessionAeadKey {
+    fn drop(&mut self) {
+        self.key = None;
+        #[cfg(test)]
+        if let Some(observer) = &self.cleanup_observer {
+            observer
+                .key_drops
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(all(feature = "session-key-agreement", target_family = "wasm"))]
+fn encrypt_with_backend(
+    session_key: &GenericArray<u8, U32>,
+    nonce: [u8; 12],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, aes_gcm::Error> {
+    WasmSessionAeadKey::new(session_key).seal(nonce, plaintext)
+}
+
+#[cfg(all(feature = "session-key-agreement", target_family = "wasm"))]
+fn decrypt_with_backend(
+    session_key: &GenericArray<u8, U32>,
+    nonce: [u8; 12],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, aes_gcm::Error> {
+    WasmSessionAeadKey::new(session_key).open(nonce, ciphertext)
 }
 
 /// Represents the establishment of a session.
@@ -243,21 +566,23 @@ pub fn derive_session_key(
     session_transcript: &SessionTranscriptBytes,
     reader: bool,
 ) -> Result<SessionKey> {
-    let salt = Sha256::digest(
-        crate::cbor::to_vec(session_transcript)
-            .map_err(|e| anyhow::anyhow!("failed to serialize session transcript: {e}"))?,
-    );
-    let hkdf = shared_secret.extract::<Sha256>(Some(salt.as_ref()));
+    let transcript = crate::cbor::to_vec(session_transcript)
+        .map_err(|e| anyhow::anyhow!("failed to serialize session transcript: {e}"))?;
+    let mut salt_hash = SecureSha256::new();
+    salt_hash.update(&transcript);
+    let salt = salt_hash.finish();
     let mut okm = Zeroizing::new([0u8; 32]);
-    let sk_device = "SKDevice".as_bytes();
-    let sk_reader = "SKReader".as_bytes();
-
-    // Safe to unwrap as error will only occur if okm.len() is greater than 255 * 32;
-    if reader {
-        Hkdf::expand(&hkdf, sk_reader, okm.as_mut()).unwrap();
-    } else {
-        Hkdf::expand(&hkdf, sk_device, okm.as_mut()).unwrap();
-    }
+    let info = if reader { b"SKReader" } else { b"SKDevice" };
+    let mut scratch = HkdfScratch::default();
+    hkdf_sha256_32_with_scratch(
+        shared_secret.raw_secret_bytes(),
+        &*salt,
+        info,
+        &mut okm,
+        &mut scratch,
+        || Ok(()),
+    )
+    .map_err(|()| anyhow::anyhow!("failed to expand session key"))?;
 
     Ok(SessionKey(okm))
 }
@@ -289,8 +614,7 @@ fn encrypt(
 ) -> Result<Vec<u8>, aes_gcm::Error> {
     let previous_message_count = *message_count;
     let initialization_vector = get_initialization_vector(message_count, reader)?;
-    let nonce = Nonce::from(initialization_vector);
-    match Aes256Gcm::new(session_key).encrypt(&nonce, plaintext) {
+    match encrypt_with_backend(session_key, initialization_vector, plaintext) {
         Ok(ciphertext) => Ok(ciphertext),
         Err(error) => {
             *message_count = previous_message_count;
@@ -326,8 +650,7 @@ fn decrypt(
 ) -> Result<Vec<u8>, aes_gcm::Error> {
     let previous_message_count = *message_count;
     let initialization_vector = get_initialization_vector(message_count, reader)?;
-    let nonce = Nonce::from(initialization_vector);
-    match Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext) {
+    match decrypt_with_backend(session_key, initialization_vector, ciphertext) {
         Ok(plaintext) => Ok(plaintext),
         Err(error) => {
             *message_count = previous_message_count;
@@ -374,6 +697,133 @@ mod test {
 
         assert!(decrypt_reader_data(&session_key, &[0u8; 16], &mut counter).is_err());
         assert_eq!(counter, 0);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_aes_256_gcm_matches_known_answer_and_drops_key() {
+        let observer = NativeAeadCleanupObserver::default();
+        let key =
+            NativeSessionAeadKey::new_with_cleanup_observer(&[0u8; 32], observer.clone()).unwrap();
+        let ciphertext = key.seal([0u8; 12], &[]).unwrap();
+        assert_eq!(hex::encode(&ciphertext), "530f8afbc74536b9a963b4f1c4cb738b");
+        assert_eq!(key.open([0u8; 12], &ciphertext).unwrap(), Vec::<u8>::new());
+        drop(key);
+        assert_eq!(observer.key_drop_count(), 1);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_aead_wipes_copied_plaintext_on_error_and_unwind() {
+        let error_observer = NativeAeadCleanupObserver::default();
+        {
+            let key = NativeSessionAeadKey::new_with_cleanup_observer(
+                &[0x11; 32],
+                error_observer.clone(),
+            )
+            .unwrap();
+            let result = key.seal_with_post_copy(
+                [0x22; 12],
+                b"recognizable plaintext",
+                |copied_plaintext| {
+                    copied_plaintext[0] ^= 0xff;
+                    Err(aes_gcm::Error)
+                },
+            );
+            assert!(result.is_err());
+        }
+        assert_eq!(error_observer.key_drop_count(), 1);
+        let error_buffers = error_observer.wiped_buffers();
+        assert_eq!(error_buffers.len(), 1);
+        assert!(!error_buffers[0].is_empty());
+        assert!(error_buffers[0].iter().all(|byte| *byte == 0));
+
+        let unwind_observer = NativeAeadCleanupObserver::default();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let observer = unwind_observer.clone();
+            move || {
+                let key =
+                    NativeSessionAeadKey::new_with_cleanup_observer(&[0x33; 32], observer).unwrap();
+                let _ = key.seal_with_post_copy(
+                    [0x44; 12],
+                    b"second recognizable plaintext",
+                    |copied_plaintext| {
+                        copied_plaintext[1] ^= 0xff;
+                        panic!("injected AEAD unwind after plaintext copy")
+                    },
+                );
+            }
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(unwind_observer.key_drop_count(), 1);
+        let unwind_buffers = unwind_observer.wiped_buffers();
+        assert_eq!(unwind_buffers.len(), 1);
+        assert!(!unwind_buffers[0].is_empty());
+        assert!(unwind_buffers[0].iter().all(|byte| *byte == 0));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_aead_wipes_failed_open_scratch() {
+        let observer = NativeAeadCleanupObserver::default();
+        {
+            let key =
+                NativeSessionAeadKey::new_with_cleanup_observer(&[0x55; 32], observer.clone())
+                    .unwrap();
+            assert!(key.open([0x66; 12], &[0xa5; 32]).is_err());
+        }
+        assert_eq!(observer.key_drop_count(), 1);
+        let buffers = observer.wiped_buffers();
+        assert_eq!(buffers.len(), 1);
+        assert!(!buffers[0].is_empty());
+        assert!(buffers[0].iter().all(|byte| *byte == 0));
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn wasm_aes_256_gcm_kat_roundtrip_and_forged_tag_cleanup() {
+        let observer = WasmAeadCleanupObserver::default();
+        let session_key = GenericArray::from([0u8; 32]);
+        let key = WasmSessionAeadKey::new_with_cleanup_observer(&session_key, observer.clone());
+        let ciphertext = key.seal([0u8; 12], &[]).unwrap();
+        assert_eq!(hex::encode(&ciphertext), "530f8afbc74536b9a963b4f1c4cb738b");
+        assert_eq!(key.open([0u8; 12], &ciphertext).unwrap(), Vec::<u8>::new());
+
+        let mut forged = ciphertext;
+        forged[0] ^= 1;
+        assert!(key.open([0u8; 12], &forged).is_err());
+        drop(key);
+        assert_eq!(observer.key_drop_count(), 1);
+        let buffers = observer.buffers.snapshots();
+        assert!(buffers.iter().any(|buffer| !buffer.is_empty()));
+        assert!(buffers
+            .iter()
+            .all(|buffer| buffer.iter().all(|byte| *byte == 0)));
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn wasm_aead_wipes_copied_plaintext_on_returned_error() {
+        let error_observer = WasmAeadCleanupObserver::default();
+        {
+            let session_key = GenericArray::from([0x11; 32]);
+            let key =
+                WasmSessionAeadKey::new_with_cleanup_observer(&session_key, error_observer.clone());
+            let result = key.seal_with_post_copy(
+                [0x22; 12],
+                b"recognizable browser plaintext",
+                |copied_plaintext| {
+                    copied_plaintext[0] ^= 0xff;
+                    Err(aes_gcm::Error)
+                },
+            );
+            assert!(result.is_err());
+        }
+        assert_eq!(error_observer.key_drop_count(), 1);
+        let buffers = error_observer.buffers.snapshots();
+        assert_eq!(buffers.len(), 1);
+        assert!(!buffers[0].is_empty());
+        assert!(buffers[0].iter().all(|byte| *byte == 0));
     }
 
     #[test]

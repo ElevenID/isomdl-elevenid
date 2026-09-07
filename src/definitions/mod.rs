@@ -9,6 +9,8 @@ pub mod issuer_signed;
 pub mod mso;
 pub mod namespaces;
 pub mod session;
+#[cfg(feature = "session-key-agreement")]
+pub(crate) mod session_crypto;
 pub mod traits;
 pub mod validity_info;
 pub mod x509;
