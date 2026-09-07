@@ -315,12 +315,8 @@ impl SessionManagerEngaged {
         )
         .map_err(Error::SharedSecretGeneration)?;
 
-        let sk_reader = Zeroizing::new(
-            derive_session_key(&shared_secret, &session_transcript_bytes, true)?.into(),
-        );
-        let sk_device = Zeroizing::new(
-            derive_session_key(&shared_secret, &session_transcript_bytes, false)?.into(),
-        );
+        let sk_reader = derive_session_key(&shared_secret, &session_transcript_bytes, true)?;
+        let sk_device = derive_session_key(&shared_secret, &session_transcript_bytes, false)?;
 
         let mut sm = SessionManager {
             documents: self.documents,

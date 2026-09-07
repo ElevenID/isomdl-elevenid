@@ -225,17 +225,15 @@ impl SessionManager {
 
         //derive session keys
         let sk_reader = derive_session_key(&shared_secret, &session_transcript_bytes, true)
-            .context("failed to derive reader session key")?
-            .into();
+            .context("failed to derive reader session key")?;
         let sk_device = derive_session_key(&shared_secret, &session_transcript_bytes, false)
-            .context("failed to derive device session key")?
-            .into();
+            .context("failed to derive device session key")?;
 
         let mut session_manager = Self {
             session_transcript,
-            sk_device: Zeroizing::new(sk_device),
+            sk_device,
             device_message_counter: 0,
-            sk_reader: Zeroizing::new(sk_reader),
+            sk_reader,
             reader_message_counter: 0,
             trust_anchor_registry,
         };
