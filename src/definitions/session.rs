@@ -287,9 +287,16 @@ fn encrypt(
     message_count: &mut u32,
     reader: bool,
 ) -> Result<Vec<u8>, aes_gcm::Error> {
+    let previous_message_count = *message_count;
     let initialization_vector = get_initialization_vector(message_count, reader)?;
     let nonce = Nonce::from(initialization_vector);
-    Aes256Gcm::new(session_key).encrypt(&nonce, plaintext)
+    match Aes256Gcm::new(session_key).encrypt(&nonce, plaintext) {
+        Ok(ciphertext) => Ok(ciphertext),
+        Err(error) => {
+            *message_count = previous_message_count;
+            Err(error)
+        }
+    }
 }
 
 #[cfg(feature = "session-key-agreement")]
@@ -317,9 +324,16 @@ fn decrypt(
     message_count: &mut u32,
     reader: bool,
 ) -> Result<Vec<u8>, aes_gcm::Error> {
+    let previous_message_count = *message_count;
     let initialization_vector = get_initialization_vector(message_count, reader)?;
     let nonce = Nonce::from(initialization_vector);
-    Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext)
+    match Aes256Gcm::new(session_key).decrypt(&nonce, ciphertext) {
+        Ok(plaintext) => Ok(plaintext),
+        Err(error) => {
+            *message_count = previous_message_count;
+            Err(error)
+        }
+    }
 }
 
 #[cfg(feature = "session-key-agreement")]
@@ -351,6 +365,15 @@ mod test {
 
         assert!(get_initialization_vector(&mut counter, true).is_err());
         assert_eq!(counter, u32::MAX);
+    }
+
+    #[test]
+    fn failed_authenticated_decryption_does_not_advance_counter() {
+        let session_key = GenericArray::from([0u8; 32]);
+        let mut counter = 0;
+
+        assert!(decrypt_reader_data(&session_key, &[0u8; 16], &mut counter).is_err());
+        assert_eq!(counter, 0);
     }
 
     #[test]
