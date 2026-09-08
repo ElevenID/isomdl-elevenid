@@ -4,18 +4,19 @@ use p256::NistP256;
 use sha2::Digest;
 use x509_cert::Certificate;
 
-use crate::definitions::x509::util::public_key;
+use crate::definitions::x509::util::public_key_with_oid;
 
 /// Check that the issuer certificate signed the subject certificate.
 pub fn issuer_signed_subject(subject: &Certificate, issuer: &Certificate) -> bool {
     // TODO: Support curves other than P-256.
-    let issuer_public_key: VerifyingKey<NistP256> = match public_key(issuer) {
-        Ok(pk) => pk,
-        Err(e) => {
-            tracing::error!("failed to decode issuer public key: {e:?}");
-            return false;
-        }
-    };
+    let issuer_public_key: VerifyingKey<NistP256> =
+        match public_key_with_oid(issuer, const_oid::db::rfc5912::SECP_256_R_1) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::error!("failed to decode issuer public key: {e:?}");
+                return false;
+            }
+        };
 
     let sig: Signature<NistP256> = match Signature::from_der(subject.signature.raw_bytes()) {
         Ok(sig) => sig,

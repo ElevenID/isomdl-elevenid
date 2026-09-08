@@ -595,7 +595,9 @@ fn verify_remote_signature(
             let signature = p256::ecdsa::Signature::from_slice(signature)
                 .map_err(|error| anyhow!("invalid ES256 remote signature encoding: {error}"))?;
             let key = x5chain
-                .end_entity_public_key::<p256::NistP256>()
+                .end_entity_public_key_with_oid::<p256::NistP256>(
+                    const_oid::db::rfc5912::SECP_256_R_1,
+                )
                 .map_err(|error| anyhow!("invalid ES256 end-entity public key: {error}"))?;
             let digest = Sha256::digest(payload);
             let field = bits2field::<p256::NistP256>(&digest)
@@ -610,7 +612,9 @@ fn verify_remote_signature(
             let signature = p384::ecdsa::Signature::from_slice(signature)
                 .map_err(|error| anyhow!("invalid ES384 remote signature encoding: {error}"))?;
             let key = x5chain
-                .end_entity_public_key::<p384::NistP384>()
+                .end_entity_public_key_with_oid::<p384::NistP384>(
+                    const_oid::db::rfc5912::SECP_384_R_1,
+                )
                 .map_err(|error| anyhow!("invalid ES384 end-entity public key: {error}"))?;
             let digest = Sha384::digest(payload);
             let field = bits2field::<p384::NistP384>(&digest)
@@ -625,7 +629,9 @@ fn verify_remote_signature(
             let signature = p521::ecdsa::Signature::from_slice(signature)
                 .map_err(|error| anyhow!("invalid ES512 remote signature encoding: {error}"))?;
             let key = x5chain
-                .end_entity_public_key::<p521::NistP521>()
+                .end_entity_public_key_with_oid::<p521::NistP521>(
+                    const_oid::db::rfc5912::SECP_521_R_1,
+                )
                 .map_err(|error| anyhow!("invalid ES512 end-entity public key: {error}"))?;
             let digest = Sha512::digest(payload);
             let field = bits2field::<p521::NistP521>(&digest)

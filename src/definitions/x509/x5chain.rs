@@ -4,10 +4,9 @@ use crate::definitions::helpers::NonEmptyVec;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 
-use const_oid::{
-    db::rfc5912::{SECP_256_R_1, SECP_384_R_1, SECP_521_R_1},
-    ObjectIdentifier,
-};
+use const_oid::AssociatedOid;
+#[cfg(feature = "issuer-planning")]
+use const_oid::ObjectIdentifier;
 
 use ciborium::Value as CborValue;
 use ecdsa::{PrimeCurve, VerifyingKey};
@@ -19,23 +18,6 @@ use x509_cert::der::Encode;
 use x509_cert::{certificate::Certificate, der::Decode};
 
 use super::util::{common_name_or_unknown, public_key};
-
-pub trait CertificateCurve {
-    const OID: ObjectIdentifier;
-}
-
-impl CertificateCurve for p256::NistP256 {
-    const OID: ObjectIdentifier = SECP_256_R_1;
-}
-
-impl CertificateCurve for p384::NistP384 {
-    const OID: ObjectIdentifier = SECP_384_R_1;
-}
-
-#[cfg(feature = "issuer-planning")]
-impl CertificateCurve for p521::NistP521 {
-    const OID: ObjectIdentifier = SECP_521_R_1;
-}
 
 /// See: <https://www.iana.org/assignments/cose/cose.xhtml#header-parameters>
 pub const X5CHAIN_COSE_HEADER_LABEL: i64 = 0x21;
@@ -128,11 +110,24 @@ impl X5Chain {
     /// Retrieve the public key of the end-entity certificate.
     pub fn end_entity_public_key<C>(&self) -> Result<VerifyingKey<C>, Error>
     where
-        C: CertificateCurve + CurveArithmetic + PrimeCurve,
+        C: AssociatedOid + CurveArithmetic + PrimeCurve,
         AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
         FieldBytesSize<C>: ModulusSize,
     {
         public_key(self.end_entity_certificate())
+    }
+
+    #[cfg(feature = "issuer-planning")]
+    pub(crate) fn end_entity_public_key_with_oid<C>(
+        &self,
+        expected_curve_oid: ObjectIdentifier,
+    ) -> Result<VerifyingKey<C>, Error>
+    where
+        C: CurveArithmetic + PrimeCurve,
+        AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+        FieldBytesSize<C>: ModulusSize,
+    {
+        super::util::public_key_with_oid(self.end_entity_certificate(), expected_curve_oid)
     }
 
     /// Retrieve the public key of the end-entity certificate.
@@ -189,6 +184,7 @@ pub mod test {
 
     static CERT_256: &[u8] = include_bytes!("../../../test/issuance/256-cert.pem");
     static CERT_384: &[u8] = include_bytes!("../../../test/issuance/384-cert.pem");
+    #[cfg(feature = "issuer-planning")]
     static CERT_521: &[u8] = include_bytes!("../../../test/issuance/521-cert.pem");
 
     #[test]
@@ -201,6 +197,26 @@ pub mod test {
         x5chain
             .end_entity_public_key::<p256::NistP256>()
             .expect("unable to decode P-256 public point");
+    }
+
+    #[test]
+    fn preserves_the_existing_associated_oid_generic_bound() {
+        fn decode_with_existing_bound<C>(x5chain: &X5Chain) -> Result<VerifyingKey<C>, Error>
+        where
+            C: const_oid::AssociatedOid + CurveArithmetic + PrimeCurve,
+            AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+            FieldBytesSize<C>: ModulusSize,
+        {
+            x5chain.end_entity_public_key::<C>()
+        }
+
+        let x5chain = X5Chain::builder()
+            .with_pem_certificate(CERT_256)
+            .expect("unable to add cert")
+            .build()
+            .expect("unable to build x5chain");
+        decode_with_existing_bound::<p256::NistP256>(&x5chain)
+            .expect("the established AssociatedOid wrapper remains compatible");
     }
 
     #[test]

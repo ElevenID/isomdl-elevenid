@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Error};
 use const_oid::{
     db::{rfc4519::COMMON_NAME, rfc5912::ID_EC_PUBLIC_KEY},
-    ObjectIdentifier,
+    AssociatedOid, ObjectIdentifier,
 };
 use der::{
     asn1::{Ia5StringRef, PrintableStringRef, TeletexStringRef, Utf8StringRef},
@@ -15,12 +15,22 @@ use elliptic_curve::{
 use sec1::point::ModulusSize;
 use x509_cert::{attr::AttributeValue, Certificate};
 
-use super::x5chain::CertificateCurve;
-
 /// Get the public key from a certificate for verification.
 pub fn public_key<C>(certificate: &Certificate) -> Result<VerifyingKey<C>, Error>
 where
-    C: CertificateCurve + CurveArithmetic + PrimeCurve,
+    C: AssociatedOid + CurveArithmetic + PrimeCurve,
+    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+    FieldBytesSize<C>: ModulusSize,
+{
+    public_key_with_oid(certificate, <C as AssociatedOid>::OID)
+}
+
+pub(crate) fn public_key_with_oid<C>(
+    certificate: &Certificate,
+    expected_curve_oid: ObjectIdentifier,
+) -> Result<VerifyingKey<C>, Error>
+where
+    C: CurveArithmetic + PrimeCurve,
     AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
     FieldBytesSize<C>: ModulusSize,
 {
@@ -36,7 +46,7 @@ where
         .context("certificate EC public key is missing named-curve parameters")?
         .decode_as::<ObjectIdentifier>()
         .context("certificate EC public key parameters are not a named-curve OID")?;
-    if curve_oid != C::OID {
+    if curve_oid != expected_curve_oid {
         bail!("certificate EC public key uses an unexpected named curve");
     }
 
