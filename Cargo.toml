@@ -37,7 +37,9 @@ simd = ["issuer-planning", "dep:wide"]
 
 [package.metadata.cargo-machete]
 # Attribute and proc-macro references are not visible to cargo-machete.
-ignored = ["serde_bytes", "strum"]
+# GHASH/POLYVAL are direct feature carriers that zeroize AES-GCM key schedules;
+# production code intentionally does not import their APIs.
+ignored = ["ghash", "polyval", "serde_bytes", "strum"]
 
 [[bin]]
 name = "isomdl-utils"
