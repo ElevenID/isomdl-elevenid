@@ -1,8 +1,10 @@
-use anyhow::{Context, Error};
-use const_oid::{db::rfc4519::COMMON_NAME, AssociatedOid};
+use anyhow::{bail, Context, Error};
+use const_oid::{
+    db::{rfc4519::COMMON_NAME, rfc5912::ID_EC_PUBLIC_KEY},
+    AssociatedOid, ObjectIdentifier,
+};
 use der::{
     asn1::{Ia5StringRef, PrintableStringRef, TeletexStringRef, Utf8StringRef},
-    referenced::OwnedToRef,
     Tag, Tagged,
 };
 use ecdsa::{PrimeCurve, VerifyingKey};
@@ -20,13 +22,40 @@ where
     AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
     FieldBytesSize<C>: ModulusSize,
 {
-    certificate
-        .tbs_certificate
-        .subject_public_key_info
-        .owned_to_ref()
-        .try_into()
-        .map(|key: PublicKey<C>| key.into())
-        .context("could not parse public key from PKCS8 SPKI")
+    public_key_with_oid(certificate, <C as AssociatedOid>::OID)
+}
+
+pub(crate) fn public_key_with_oid<C>(
+    certificate: &Certificate,
+    expected_curve_oid: ObjectIdentifier,
+) -> Result<VerifyingKey<C>, Error>
+where
+    C: CurveArithmetic + PrimeCurve,
+    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+    FieldBytesSize<C>: ModulusSize,
+{
+    let spki = &certificate.tbs_certificate.subject_public_key_info;
+    if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
+        bail!("certificate public key algorithm is not id-ecPublicKey");
+    }
+
+    let curve_oid = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .context("certificate EC public key is missing named-curve parameters")?
+        .decode_as::<ObjectIdentifier>()
+        .context("certificate EC public key parameters are not a named-curve OID")?;
+    if curve_oid != expected_curve_oid {
+        bail!("certificate EC public key uses an unexpected named curve");
+    }
+    if spki.subject_public_key.unused_bits() != 0 {
+        bail!("certificate EC public key BIT STRING has unused bits");
+    }
+
+    PublicKey::<C>::from_sec1_bytes(spki.subject_public_key.raw_bytes())
+        .map(Into::into)
+        .context("could not parse certificate SEC1 public key")
 }
 
 /// Get the first CommonName of the X.509 certificate, or return "Unknown".

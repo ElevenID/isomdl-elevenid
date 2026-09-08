@@ -18,7 +18,7 @@ use p256::ecdsa::Signature;
 
 pub fn issuer_authentication(x5chain: X5Chain, issuer_signed: &IssuerSigned) -> Result<(), Error> {
     let signer_key: P256Verifier = x5chain
-        .end_entity_public_key()
+        .end_entity_public_key_with_oid::<p256::NistP256>(const_oid::db::rfc5912::SECP_256_R_1)
         .map_err(Error::IssuerPublicKey)?
         .into();
     let verification_result: cose::sign1::VerificationResult =

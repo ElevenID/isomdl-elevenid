@@ -70,6 +70,21 @@ use super::{
 ///
 /// For convenience, the [SessionManagerInit] state surfaces the [SessionManagerInit::ble_ident] method
 /// to provide the BLE identification string for the device.
+///
+/// ```compile_fail
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<isomdl::presentation::device::SessionManagerInit>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_serialize<T: serde::Serialize>() {}
+/// assert_serialize::<isomdl::presentation::device::SessionManagerInit>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_deserialize<T: for<'de> serde::Deserialize<'de>>() {}
+/// assert_deserialize::<isomdl::presentation::device::SessionManagerInit>();
+/// ```
 pub struct SessionManagerInit {
     documents: Documents,
     e_device_key: p256::SecretKey,
@@ -80,6 +95,21 @@ pub struct SessionManagerInit {
 ///
 /// Transition to this state is made with [SessionManagerInit::qr_engagement].
 /// That creates the `QR code` that the reader will use to establish the session.
+///
+/// ```compile_fail
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<isomdl::presentation::device::SessionManagerEngaged>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_serialize<T: serde::Serialize>() {}
+/// assert_serialize::<isomdl::presentation::device::SessionManagerEngaged>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_deserialize<T: for<'de> serde::Deserialize<'de>>() {}
+/// assert_deserialize::<isomdl::presentation::device::SessionManagerEngaged>();
+/// ```
 pub struct SessionManagerEngaged {
     documents: Documents,
     e_device_key: p256::SecretKey,
@@ -101,6 +131,25 @@ pub struct SessionManagerEngaged {
 ///
 /// For convience, the [SessionManagerInit] state surfaces the [SessionManagerInit::ble_ident] method
 /// to provide the BLE identification string for the device.
+///
+/// Session state is intentionally single-owner:
+///
+/// ```compile_fail
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<isomdl::presentation::device::SessionManager>();
+/// ```
+///
+/// Session secrets must never enter a serialization path:
+///
+/// ```compile_fail
+/// fn assert_serialize<T: serde::Serialize>() {}
+/// assert_serialize::<isomdl::presentation::device::SessionManager>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_deserialize<T: for<'de> serde::Deserialize<'de>>() {}
+/// assert_deserialize::<isomdl::presentation::device::SessionManager>();
+/// ```
 pub struct SessionManager {
     documents: Documents,
     session_transcript: SessionTranscript180135,
@@ -620,7 +669,9 @@ impl SessionManager {
         outcome.errors.extend(x5chain_validation_outcome.errors);
 
         // TODO: Support more than P-256.
-        let verifier: P256Verifier = match x5chain.end_entity_public_key() {
+        let verifier: P256Verifier = match x5chain
+            .end_entity_public_key_with_oid::<p256::NistP256>(const_oid::db::rfc5912::SECP_256_R_1)
+        {
             Ok(verifier) => verifier.into(),
             Err(e) => {
                 outcome.errors.push(format!(

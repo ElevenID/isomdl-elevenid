@@ -1,6 +1,6 @@
 [package]
 name = "isomdl"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "ISO mDL implementation in Rust"
 readme = "README.md"
@@ -19,10 +19,14 @@ session-key-agreement = [
     "presentation-verifier",
     "dep:aes",
     "dep:aes-gcm",
+    "dep:aws-lc-rs",
+    "dep:ghash",
     "dep:asn1-rs",
     "dep:hkdf",
     "dep:hmac",
     "dep:rand",
+    "dep:polyval",
+    "dep:subtle",
     "p256/ecdh",
     "p384/ecdh",
     "dep:zeroize",
@@ -33,7 +37,9 @@ simd = ["issuer-planning", "dep:wide"]
 
 [package.metadata.cargo-machete]
 # Attribute and proc-macro references are not visible to cargo-machete.
-ignored = ["serde_bytes", "strum"]
+# GHASH/POLYVAL are direct feature carriers that zeroize AES-GCM key schedules;
+# production code intentionally does not import their APIs.
+ignored = ["ghash", "polyval", "serde_bytes", "strum"]
 
 [[bin]]
 name = "isomdl-utils"
@@ -43,21 +49,23 @@ required-features = ["cli"]
 [dependencies]
 anyhow = "1.0"
 ecdsa = { version = "0.16.9", default-features = false, features = ["serde", "verifying"] }
-p256 = { version = "0.13.0", default-features = false, features = ["arithmetic", "ecdsa-core", "pkcs8", "serde", "std"] }
-p384 = { version = "0.13.0", default-features = false, features = ["arithmetic", "ecdsa-core", "pkcs8", "serde", "std"] }
-p521 = { version = "0.13.3", default-features = false, features = ["ecdsa-core"], optional = true }
+p256 = { version = "0.13.0", default-features = false, features = ["arithmetic", "ecdsa-core", "serde", "std"] }
+p384 = { version = "0.13.0", default-features = false, features = ["arithmetic", "ecdsa-core", "serde", "std"] }
+p521 = { version = "0.13.3", default-features = false, features = ["arithmetic", "ecdsa-core"], optional = true }
 rand = { version = "0.8.5", features = ["getrandom"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_bytes = "0.11.0"
-sha2 = { version = "0.10.8", features = ["oid"] }
+sha2 = { version = "0.10.8", features = ["compress", "oid"] }
 thiserror = "1.0"
 elliptic-curve = "0.13.1"
+aes-gcm = { version = "0.10.1", features = ["zeroize"], optional = true }
 hkdf = { version = "0.12.3", optional = true }
-aes-gcm = { version = "0.10.1", optional = true }
 hmac = { version = "0.12.1", features = ["reset"], optional = true }
-aes = { version = "0.8.2", optional = true }
-zeroize = { version = "1.8", features = ["alloc"], optional = true }
+aes = { version = "0.8.2", features = ["zeroize"], optional = true }
+ghash = { version = "0.5.1", features = ["zeroize"], optional = true }
+polyval = { version = "0.6.2", features = ["zeroize"], optional = true }
+zeroize = { version = "1.8", features = ["alloc", "derive"], optional = true }
 sec1 = "0.7.1"
 uuid = { version = "1.3", features = ["v1", "v4", "std", "rng", "serde", "js"] }
 time = { version = "0.3.20", features = ["formatting", "parsing", "macros"] }
@@ -82,6 +90,7 @@ ciborium = "0.2.2"
 digest = "0.10.7"
 tracing = "0.1.41"
 sha1 = "0.10.6"
+subtle = { version = "2.6.1", optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 # `rand` 0.8 delegates browser entropy to `getrandom` 0.2. Enable its JS
@@ -89,6 +98,7 @@ sha1 = "0.10.6"
 getrandom = { version = "0.2", features = ["js"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+aws-lc-rs = { version = "1.18.0", optional = true }
 rayon = { version = "1.12", optional = true }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
@@ -100,11 +110,15 @@ criterion = { version = "0.7", default-features = false }
 hex = "0.4.3"
 p256 = "0.13.0"
 p384 = { version = "0.13.1", features = ["ecdsa"] }
+p521 = { version = "0.13.3", features = ["ecdsa", "pem"] }
 rand = "0.8.5"
 rstest = "0.23.0"
 serde_json = "1.0.145"
 test-log = { version = "0.2.16", features = ["trace"] }
 x509-cert = { version = "0.2.4", features = ["pem", "builder", "hazmat"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "=0.3.77"
 
 [[test]]
 name = "namespace"

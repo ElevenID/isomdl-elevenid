@@ -4,7 +4,7 @@ use crate::definitions::helpers::NonEmptyVec;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 
-use const_oid::AssociatedOid;
+use const_oid::{AssociatedOid, ObjectIdentifier};
 
 use ciborium::Value as CborValue;
 use ecdsa::{PrimeCurve, VerifyingKey};
@@ -115,6 +115,18 @@ impl X5Chain {
         public_key(self.end_entity_certificate())
     }
 
+    pub(crate) fn end_entity_public_key_with_oid<C>(
+        &self,
+        expected_curve_oid: ObjectIdentifier,
+    ) -> Result<VerifyingKey<C>, Error>
+    where
+        C: CurveArithmetic + PrimeCurve,
+        AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+        FieldBytesSize<C>: ModulusSize,
+    {
+        super::util::public_key_with_oid(self.end_entity_certificate(), expected_curve_oid)
+    }
+
     /// Retrieve the public key of the end-entity certificate.
     pub fn end_entity_common_name(&self) -> &str {
         common_name_or_unknown(self.end_entity_certificate())
@@ -169,32 +181,115 @@ pub mod test {
 
     static CERT_256: &[u8] = include_bytes!("../../../test/issuance/256-cert.pem");
     static CERT_384: &[u8] = include_bytes!("../../../test/issuance/384-cert.pem");
+    #[cfg(feature = "issuer-planning")]
     static CERT_521: &[u8] = include_bytes!("../../../test/issuance/521-cert.pem");
 
     #[test]
     pub fn self_signed_es256() {
-        let _x5chain = X5Chain::builder()
+        let x5chain = X5Chain::builder()
             .with_pem_certificate(CERT_256)
             .expect("unable to add cert")
             .build()
             .expect("unable to build x5chain");
+        x5chain
+            .end_entity_public_key::<p256::NistP256>()
+            .expect("unable to decode P-256 public point");
+    }
+
+    #[test]
+    fn preserves_the_existing_associated_oid_generic_bound() {
+        fn decode_with_existing_bound<C>(x5chain: &X5Chain) -> Result<VerifyingKey<C>, Error>
+        where
+            C: const_oid::AssociatedOid + CurveArithmetic + PrimeCurve,
+            AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+            FieldBytesSize<C>: ModulusSize,
+        {
+            x5chain.end_entity_public_key::<C>()
+        }
+
+        let x5chain = X5Chain::builder()
+            .with_pem_certificate(CERT_256)
+            .expect("unable to add cert")
+            .build()
+            .expect("unable to build x5chain");
+        decode_with_existing_bound::<p256::NistP256>(&x5chain)
+            .expect("the established AssociatedOid wrapper remains compatible");
     }
 
     #[test]
     pub fn self_signed_es384() {
-        let _x5chain = X5Chain::builder()
+        let x5chain = X5Chain::builder()
             .with_pem_certificate(CERT_384)
             .expect("unable to add cert")
             .build()
             .expect("unable to build x5chain");
+        x5chain
+            .end_entity_public_key::<p384::NistP384>()
+            .expect("unable to decode P-384 public point");
     }
 
+    #[cfg(feature = "issuer-planning")]
     #[test]
     pub fn self_signed_es512() {
-        let _x5chain = X5Chain::builder()
+        let x5chain = X5Chain::builder()
             .with_pem_certificate(CERT_521)
             .expect("unable to add cert")
             .build()
             .expect("unable to build x5chain");
+        x5chain
+            .end_entity_public_key::<p521::NistP521>()
+            .expect("unable to decode P-521 public point");
+    }
+
+    #[test]
+    fn rejects_public_point_when_named_curve_does_not_match() {
+        let x5chain = X5Chain::builder()
+            .with_pem_certificate(CERT_256)
+            .expect("unable to add cert")
+            .build()
+            .expect("unable to build x5chain");
+        let error = x5chain
+            .end_entity_public_key::<p384::NistP384>()
+            .expect_err("P-256 certificate must not decode as P-384");
+        assert_eq!(
+            error.to_string(),
+            "certificate EC public key uses an unexpected named curve"
+        );
+    }
+
+    #[test]
+    fn rejects_certificate_public_point_with_unused_bits() {
+        use der::asn1::BitString;
+
+        let x5chain = X5Chain::builder()
+            .with_pem_certificate(CERT_256)
+            .expect("unable to add cert")
+            .build()
+            .expect("unable to build x5chain");
+        let mut certificate = x5chain.end_entity_certificate().clone();
+        let mut point = certificate
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes()
+            .to_vec();
+        *point.last_mut().expect("non-empty SEC1 point") &= 0xfe;
+        certificate
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key = BitString::new(1, point).expect("one-unused-bit public point");
+        let malformed = X5Chain::builder()
+            .with_certificate(certificate)
+            .expect("encode malformed test certificate")
+            .build()
+            .expect("build malformed test chain");
+
+        let error = malformed
+            .end_entity_public_key_with_oid::<p256::NistP256>(const_oid::db::rfc5912::SECP_256_R_1)
+            .expect_err("non-canonical BIT STRING must fail before point decoding");
+        assert_eq!(
+            error.to_string(),
+            "certificate EC public key BIT STRING has unused bits"
+        );
     }
 }
