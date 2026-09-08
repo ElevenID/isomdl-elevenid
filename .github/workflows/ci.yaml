@@ -74,6 +74,13 @@ jobs:
       - name: Check WebAssembly fallback
         run: cargo check --target wasm32-unknown-unknown --all-features --lib
 
+      - name: Run WebAssembly session crypto security tests
+        shell: bash
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.127 --locked
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+            cargo test --locked --target wasm32-unknown-unknown --all-features --lib wasm_a
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features --no-deps
 
