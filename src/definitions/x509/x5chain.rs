@@ -4,9 +4,7 @@ use crate::definitions::helpers::NonEmptyVec;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 
-use const_oid::AssociatedOid;
-#[cfg(feature = "issuer-planning")]
-use const_oid::ObjectIdentifier;
+use const_oid::{AssociatedOid, ObjectIdentifier};
 
 use ciborium::Value as CborValue;
 use ecdsa::{PrimeCurve, VerifyingKey};
@@ -117,7 +115,6 @@ impl X5Chain {
         public_key(self.end_entity_certificate())
     }
 
-    #[cfg(feature = "issuer-planning")]
     pub(crate) fn end_entity_public_key_with_oid<C>(
         &self,
         expected_curve_oid: ObjectIdentifier,
@@ -257,6 +254,42 @@ pub mod test {
         assert_eq!(
             error.to_string(),
             "certificate EC public key uses an unexpected named curve"
+        );
+    }
+
+    #[test]
+    fn rejects_certificate_public_point_with_unused_bits() {
+        use der::asn1::BitString;
+
+        let x5chain = X5Chain::builder()
+            .with_pem_certificate(CERT_256)
+            .expect("unable to add cert")
+            .build()
+            .expect("unable to build x5chain");
+        let mut certificate = x5chain.end_entity_certificate().clone();
+        let mut point = certificate
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes()
+            .to_vec();
+        *point.last_mut().expect("non-empty SEC1 point") &= 0xfe;
+        certificate
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key = BitString::new(1, point).expect("one-unused-bit public point");
+        let malformed = X5Chain::builder()
+            .with_certificate(certificate)
+            .expect("encode malformed test certificate")
+            .build()
+            .expect("build malformed test chain");
+
+        let error = malformed
+            .end_entity_public_key_with_oid::<p256::NistP256>(const_oid::db::rfc5912::SECP_256_R_1)
+            .expect_err("non-canonical BIT STRING must fail before point decoding");
+        assert_eq!(
+            error.to_string(),
+            "certificate EC public key BIT STRING has unused bits"
         );
     }
 }

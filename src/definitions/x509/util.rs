@@ -49,6 +49,9 @@ where
     if curve_oid != expected_curve_oid {
         bail!("certificate EC public key uses an unexpected named curve");
     }
+    if spki.subject_public_key.unused_bits() != 0 {
+        bail!("certificate EC public key BIT STRING has unused bits");
+    }
 
     PublicKey::<C>::from_sec1_bytes(spki.subject_public_key.raw_bytes())
         .map(Into::into)
