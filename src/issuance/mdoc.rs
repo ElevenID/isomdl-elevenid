@@ -8,8 +8,10 @@ use anyhow::{anyhow, Result};
 use async_signature::AsyncSigner;
 use coset::iana::Algorithm;
 use coset::{CoseSign1, Label};
+use ecdsa::hazmat::{bits2field, verify_prehashed};
 use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 #[cfg(test)]
 use signature::{SignatureEncoding, Signer};
 
@@ -550,7 +552,7 @@ impl PreparedMdoc {
             .prepared_sig
             .algorithm()
             .ok_or_else(|| anyhow!("prepared mdoc is missing a protected signature algorithm"))?;
-        validate_remote_signature(algorithm, &signature)?;
+        verify_remote_signature(algorithm, &x5chain, self.signature_payload(), &signature)?;
         let PreparedMdoc {
             doc_type,
             namespaces,
@@ -573,24 +575,65 @@ impl PreparedMdoc {
     }
 }
 
-fn validate_remote_signature(algorithm: Algorithm, signature: &[u8]) -> Result<()> {
-    let valid = match algorithm {
-        Algorithm::ES256 => p256::ecdsa::Signature::from_slice(signature).is_ok(),
-        Algorithm::ES384 => p384::ecdsa::Signature::from_slice(signature).is_ok(),
-        Algorithm::ES512 => p521::ecdsa::Signature::from_slice(signature).is_ok(),
+fn verify_remote_signature(
+    algorithm: Algorithm,
+    x5chain: &X5Chain,
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let verification = match algorithm {
+        Algorithm::ES256 => {
+            let signature = p256::ecdsa::Signature::from_slice(signature)
+                .map_err(|error| anyhow!("invalid ES256 remote signature encoding: {error}"))?;
+            let key = x5chain
+                .end_entity_public_key::<p256::NistP256>()
+                .map_err(|error| anyhow!("invalid ES256 end-entity public key: {error}"))?;
+            let digest = Sha256::digest(payload);
+            let field = bits2field::<p256::NistP256>(&digest)
+                .map_err(|error| anyhow!("invalid ES256 message digest: {error}"))?;
+            verify_prehashed(
+                &p256::ProjectivePoint::from(*key.as_affine()),
+                &field,
+                &signature,
+            )
+        }
+        Algorithm::ES384 => {
+            let signature = p384::ecdsa::Signature::from_slice(signature)
+                .map_err(|error| anyhow!("invalid ES384 remote signature encoding: {error}"))?;
+            let key = x5chain
+                .end_entity_public_key::<p384::NistP384>()
+                .map_err(|error| anyhow!("invalid ES384 end-entity public key: {error}"))?;
+            let digest = Sha384::digest(payload);
+            let field = bits2field::<p384::NistP384>(&digest)
+                .map_err(|error| anyhow!("invalid ES384 message digest: {error}"))?;
+            verify_prehashed(
+                &p384::ProjectivePoint::from(*key.as_affine()),
+                &field,
+                &signature,
+            )
+        }
+        Algorithm::ES512 => {
+            let signature = p521::ecdsa::Signature::from_slice(signature)
+                .map_err(|error| anyhow!("invalid ES512 remote signature encoding: {error}"))?;
+            let key = x5chain
+                .end_entity_public_key::<p521::NistP521>()
+                .map_err(|error| anyhow!("invalid ES512 end-entity public key: {error}"))?;
+            let digest = Sha512::digest(payload);
+            let field = bits2field::<p521::NistP521>(&digest)
+                .map_err(|error| anyhow!("invalid ES512 message digest: {error}"))?;
+            verify_prehashed(
+                &p521::ProjectivePoint::from(*key.as_affine()),
+                &field,
+                &signature,
+            )
+        }
         _ => {
             return Err(anyhow!(
                 "unsupported remote mdoc signing algorithm: {algorithm:?}"
             ))
         }
     };
-    if !valid {
-        return Err(anyhow!(
-            "invalid {algorithm:?} remote signature encoding: got {} bytes",
-            signature.len()
-        ));
-    }
-    Ok(())
+    verification.map_err(|error| anyhow!("unauthentic {algorithm:?} remote signature: {error}"))
 }
 
 impl Builder {
@@ -1265,6 +1308,10 @@ pub mod test {
 
     static ISSUER_CERT: &[u8] = include_bytes!("../../test/issuance/issuer-cert.pem");
     static ISSUER_KEY: &str = include_str!("../../test/issuance/issuer-key.pem");
+    static ISSUER_384_CERT: &[u8] = include_bytes!("../../test/issuance/384-cert.pem");
+    static ISSUER_384_KEY: &str = include_str!("../../test/issuance/384-key.pem");
+    static ISSUER_521_CERT: &[u8] = include_bytes!("../../test/issuance/521-cert.pem");
+    static ISSUER_521_KEY: &str = include_str!("../../test/issuance/521-key.pem");
 
     /// Explicit replay tape whose bulk fill consumes the same sequence as the
     /// legacy per-byte loop. Production RNGs need only preserve the same byte
@@ -1546,20 +1593,85 @@ pub mod test {
         let mut valid = vec![0; 64];
         valid[31] = 1;
         valid[63] = 1;
-        assert!(prepare().complete(chain(), valid).is_ok());
+        assert!(prepare().complete(chain(), valid).is_err());
     }
 
     #[test]
-    fn remote_signature_validation_covers_all_supported_curves() {
-        for (algorithm, width) in [(Algorithm::ES384, 96), (Algorithm::ES512, 132)] {
-            let mut valid = vec![0u8; width];
-            valid[width / 2 - 1] = 1;
-            valid[width - 1] = 1;
-            assert!(validate_remote_signature(algorithm, &valid).is_ok());
-            assert!(validate_remote_signature(algorithm, &vec![0u8; width]).is_err());
-            assert!(validate_remote_signature(algorithm, &vec![0xffu8; width]).is_err());
-        }
-        assert!(validate_remote_signature(Algorithm::EdDSA, &[1u8; 64]).is_err());
+    fn remote_completion_binds_es256_signature_to_payload_and_certificate() {
+        let chain = || {
+            X5Chain::builder()
+                .with_pem_certificate(ISSUER_CERT)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let prepared = minimal_test_mdoc_builder()
+            .prepare(Algorithm::ES256)
+            .unwrap();
+        let signer: SigningKey = SecretKey::from_pkcs8_pem(ISSUER_KEY).unwrap().into();
+        let signature: Signature = signer.sign(prepared.signature_payload());
+
+        assert!(prepared
+            .clone()
+            .complete(chain(), signature.to_vec())
+            .is_ok());
+
+        let wrong_payload_signature: Signature = signer.sign(b"not the prepared COSE payload");
+        assert!(prepared
+            .clone()
+            .complete(chain(), wrong_payload_signature.to_vec())
+            .is_err());
+
+        let wrong_signer = SigningKey::random(&mut rand::thread_rng());
+        let wrong_key_signature: Signature = wrong_signer.sign(prepared.signature_payload());
+        assert!(prepared
+            .clone()
+            .complete(chain(), wrong_key_signature.to_vec())
+            .is_err());
+
+        let mut changed_signature = signature.to_vec();
+        changed_signature[0] ^= 1;
+        assert!(prepared.complete(chain(), changed_signature).is_err());
+    }
+
+    #[test]
+    fn remote_completion_verifies_es384_and_es512_signatures() {
+        let prepared = minimal_test_mdoc_builder()
+            .prepare(Algorithm::ES384)
+            .unwrap();
+        let signer: p384::ecdsa::SigningKey = p384::SecretKey::from_pkcs8_pem(ISSUER_384_KEY)
+            .unwrap()
+            .into();
+        let signature: p384::ecdsa::Signature = signer.sign(prepared.signature_payload());
+        let chain = X5Chain::builder()
+            .with_pem_certificate(ISSUER_384_CERT)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(prepared.complete(chain, signature.to_vec()).is_ok());
+
+        let prepared = minimal_test_mdoc_builder()
+            .prepare(Algorithm::ES512)
+            .unwrap();
+        let secret = p521::SecretKey::from_pkcs8_pem(ISSUER_521_KEY).unwrap();
+        let signer = p521::ecdsa::SigningKey::from_slice(secret.to_bytes().as_slice()).unwrap();
+        let signature: p521::ecdsa::Signature = signer.sign(prepared.signature_payload());
+        let chain = X5Chain::builder()
+            .with_pem_certificate(ISSUER_521_CERT)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(prepared.complete(chain, signature.to_vec()).is_ok());
+    }
+
+    #[test]
+    fn remote_completion_rejects_unsupported_algorithm() {
+        let chain = X5Chain::builder()
+            .with_pem_certificate(ISSUER_CERT)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(verify_remote_signature(Algorithm::EdDSA, &chain, b"payload", &[1u8; 64]).is_err());
     }
 
     pub fn minimal_test_mdoc() -> anyhow::Result<Mdoc> {
@@ -3223,27 +3335,5 @@ pub mod test {
                 .values()
                 .fold(0, |acc, x| acc + x.len()),
         );
-    }
-}
-
-#[cfg(all(test, feature = "issuer-planning"))]
-mod issuer_planning_tests {
-    use super::{validate_remote_signature, Algorithm};
-
-    #[test]
-    fn remote_signature_validation_covers_all_supported_curves() {
-        for (algorithm, width) in [
-            (Algorithm::ES256, 64),
-            (Algorithm::ES384, 96),
-            (Algorithm::ES512, 132),
-        ] {
-            let mut valid = vec![0u8; width];
-            valid[width / 2 - 1] = 1;
-            valid[width - 1] = 1;
-            assert!(validate_remote_signature(algorithm, &valid).is_ok());
-            assert!(validate_remote_signature(algorithm, &vec![0u8; width]).is_err());
-            assert!(validate_remote_signature(algorithm, &vec![0xffu8; width]).is_err());
-        }
-        assert!(validate_remote_signature(Algorithm::EdDSA, &[1u8; 64]).is_err());
     }
 }
