@@ -387,7 +387,7 @@ impl NativeParallelDigestExecutor {
         self.worker_count
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_family = "wasm")))]
     fn with_worker(worker_count: NonZeroUsize, worker: DigestWorker) -> Self {
         Self {
             worker_count: worker_count.get().min(MAX_PARALLEL_DIGEST_WORKERS),
