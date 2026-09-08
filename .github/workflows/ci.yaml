@@ -48,7 +48,11 @@ jobs:
           cargo test
 
       - name: Test remote issuer-planning boundary
-        run: cargo test --locked --no-default-features --features issuer-planning --lib
+        run: |
+          # `cargo check` excludes dev-dependency feature unification, ensuring the
+          # production-only P-521 verifier can decode the certificate public key.
+          cargo check --locked --no-default-features --features issuer-planning --lib
+          cargo test --locked --no-default-features --features issuer-planning --lib
 
       - name: Guard issuer-planning curve codecs
         shell: bash

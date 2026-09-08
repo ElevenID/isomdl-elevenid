@@ -51,7 +51,7 @@ anyhow = "1.0"
 ecdsa = { version = "0.16.9", default-features = false, features = ["serde", "verifying"] }
 p256 = { version = "0.13.0", default-features = false, features = ["arithmetic", "ecdsa-core", "pkcs8", "serde", "std"] }
 p384 = { version = "0.13.0", default-features = false, features = ["arithmetic", "ecdsa-core", "pkcs8", "serde", "std"] }
-p521 = { version = "0.13.3", default-features = false, features = ["arithmetic", "ecdsa-core"], optional = true }
+p521 = { version = "0.13.3", default-features = false, features = ["arithmetic", "ecdsa-core", "pkcs8"], optional = true }
 rand = { version = "0.8.5", features = ["getrandom"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
