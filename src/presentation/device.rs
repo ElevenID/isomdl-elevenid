@@ -101,6 +101,20 @@ pub struct SessionManagerEngaged {
 ///
 /// For convience, the [SessionManagerInit] state surfaces the [SessionManagerInit::ble_ident] method
 /// to provide the BLE identification string for the device.
+///
+/// Session state is intentionally single-owner:
+///
+/// ```compile_fail
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<isomdl::presentation::device::SessionManager>();
+/// ```
+///
+/// Session secrets must never enter a serialization path:
+///
+/// ```compile_fail
+/// fn assert_serialize<T: serde::Serialize>() {}
+/// assert_serialize::<isomdl::presentation::device::SessionManager>();
+/// ```
 pub struct SessionManager {
     documents: Documents,
     session_transcript: SessionTranscript180135,

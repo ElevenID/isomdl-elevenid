@@ -51,6 +51,20 @@ use crate::{
 /// for handling the session with the device.
 ///
 /// The transition to this state is made by [SessionManager::establish_session].
+///
+/// Session state is intentionally single-owner:
+///
+/// ```compile_fail
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<isomdl::presentation::reader::SessionManager>();
+/// ```
+///
+/// Session secrets must never enter a serialization path:
+///
+/// ```compile_fail
+/// fn assert_serialize<T: serde::Serialize>() {}
+/// assert_serialize::<isomdl::presentation::reader::SessionManager>();
+/// ```
 pub struct SessionManager {
     session_transcript: SessionTranscript180135,
     sk_device: SessionKey,
