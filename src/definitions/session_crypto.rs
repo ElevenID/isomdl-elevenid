@@ -104,8 +104,8 @@ impl SecureSha256 {
         self.compress_buffer();
 
         let mut digest = Zeroizing::new([0u8; 32]);
-        for (chunk, word) in digest.chunks_exact_mut(4).zip(self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
+        for (index, word) in self.state.into_iter().enumerate() {
+            digest[index * 4..(index + 1) * 4].copy_from_slice(&word.to_be_bytes());
         }
         self.clear();
         digest
