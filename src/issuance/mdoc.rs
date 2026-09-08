@@ -46,12 +46,21 @@ pub struct Mdoc {
 }
 
 /// An incomplete mdoc, requiring a remotely signed signature to be completed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PreparedMdoc {
     doc_type: String,
     mso: Mso,
     namespaces: IssuerNamespaces,
     prepared_sig: PreparedCoseSign1,
+}
+
+impl fmt::Debug for PreparedMdoc {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedMdoc")
+            .field("contents", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1672,6 +1681,30 @@ pub mod test {
             .build()
             .unwrap();
         assert!(verify_remote_signature(Algorithm::EdDSA, &chain, b"payload", &[1u8; 64]).is_err());
+    }
+
+    #[test]
+    fn prepared_mdoc_debug_redacts_plaintext_claims_and_signing_payload() {
+        const SENTINEL: &str = "claim-value-that-must-never-be-logged";
+        let namespaces = [(
+            "org.iso.18013.5.1".to_owned(),
+            [(
+                "sensitive_claim".to_owned(),
+                ciborium::Value::Text(SENTINEL.to_owned()),
+            )]
+            .into_iter()
+            .collect(),
+        )]
+        .into_iter()
+        .collect();
+        let prepared = minimal_test_mdoc_builder()
+            .namespaces(namespaces)
+            .prepare(Algorithm::ES256)
+            .unwrap();
+
+        let debug = format!("{prepared:?}");
+        assert_eq!(debug, "PreparedMdoc { contents: \"[redacted]\" }");
+        assert!(!debug.contains(SENTINEL));
     }
 
     pub fn minimal_test_mdoc() -> anyhow::Result<Mdoc> {
