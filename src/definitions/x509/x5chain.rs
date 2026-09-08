@@ -4,7 +4,10 @@ use crate::definitions::helpers::NonEmptyVec;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 
-use const_oid::AssociatedOid;
+use const_oid::{
+    db::rfc5912::{SECP_256_R_1, SECP_384_R_1, SECP_521_R_1},
+    ObjectIdentifier,
+};
 
 use ciborium::Value as CborValue;
 use ecdsa::{PrimeCurve, VerifyingKey};
@@ -16,6 +19,23 @@ use x509_cert::der::Encode;
 use x509_cert::{certificate::Certificate, der::Decode};
 
 use super::util::{common_name_or_unknown, public_key};
+
+pub trait CertificateCurve {
+    const OID: ObjectIdentifier;
+}
+
+impl CertificateCurve for p256::NistP256 {
+    const OID: ObjectIdentifier = SECP_256_R_1;
+}
+
+impl CertificateCurve for p384::NistP384 {
+    const OID: ObjectIdentifier = SECP_384_R_1;
+}
+
+#[cfg(feature = "issuer-planning")]
+impl CertificateCurve for p521::NistP521 {
+    const OID: ObjectIdentifier = SECP_521_R_1;
+}
 
 /// See: <https://www.iana.org/assignments/cose/cose.xhtml#header-parameters>
 pub const X5CHAIN_COSE_HEADER_LABEL: i64 = 0x21;
@@ -108,7 +128,7 @@ impl X5Chain {
     /// Retrieve the public key of the end-entity certificate.
     pub fn end_entity_public_key<C>(&self) -> Result<VerifyingKey<C>, Error>
     where
-        C: AssociatedOid + CurveArithmetic + PrimeCurve,
+        C: CertificateCurve + CurveArithmetic + PrimeCurve,
         AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
         FieldBytesSize<C>: ModulusSize,
     {
@@ -173,28 +193,54 @@ pub mod test {
 
     #[test]
     pub fn self_signed_es256() {
-        let _x5chain = X5Chain::builder()
+        let x5chain = X5Chain::builder()
             .with_pem_certificate(CERT_256)
             .expect("unable to add cert")
             .build()
             .expect("unable to build x5chain");
+        x5chain
+            .end_entity_public_key::<p256::NistP256>()
+            .expect("unable to decode P-256 public point");
     }
 
     #[test]
     pub fn self_signed_es384() {
-        let _x5chain = X5Chain::builder()
+        let x5chain = X5Chain::builder()
             .with_pem_certificate(CERT_384)
             .expect("unable to add cert")
             .build()
             .expect("unable to build x5chain");
+        x5chain
+            .end_entity_public_key::<p384::NistP384>()
+            .expect("unable to decode P-384 public point");
     }
 
+    #[cfg(feature = "issuer-planning")]
     #[test]
     pub fn self_signed_es512() {
-        let _x5chain = X5Chain::builder()
+        let x5chain = X5Chain::builder()
             .with_pem_certificate(CERT_521)
             .expect("unable to add cert")
             .build()
             .expect("unable to build x5chain");
+        x5chain
+            .end_entity_public_key::<p521::NistP521>()
+            .expect("unable to decode P-521 public point");
+    }
+
+    #[test]
+    fn rejects_public_point_when_named_curve_does_not_match() {
+        let x5chain = X5Chain::builder()
+            .with_pem_certificate(CERT_256)
+            .expect("unable to add cert")
+            .build()
+            .expect("unable to build x5chain");
+        let error = x5chain
+            .end_entity_public_key::<p384::NistP384>()
+            .expect_err("P-256 certificate must not decode as P-384");
+        assert_eq!(
+            error.to_string(),
+            "certificate EC public key uses an unexpected named curve"
+        );
     }
 }

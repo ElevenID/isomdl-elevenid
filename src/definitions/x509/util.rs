@@ -1,8 +1,10 @@
-use anyhow::{Context, Error};
-use const_oid::{db::rfc4519::COMMON_NAME, AssociatedOid};
+use anyhow::{bail, Context, Error};
+use const_oid::{
+    db::{rfc4519::COMMON_NAME, rfc5912::ID_EC_PUBLIC_KEY},
+    ObjectIdentifier,
+};
 use der::{
     asn1::{Ia5StringRef, PrintableStringRef, TeletexStringRef, Utf8StringRef},
-    referenced::OwnedToRef,
     Tag, Tagged,
 };
 use ecdsa::{PrimeCurve, VerifyingKey};
@@ -13,20 +15,34 @@ use elliptic_curve::{
 use sec1::point::ModulusSize;
 use x509_cert::{attr::AttributeValue, Certificate};
 
+use super::x5chain::CertificateCurve;
+
 /// Get the public key from a certificate for verification.
 pub fn public_key<C>(certificate: &Certificate) -> Result<VerifyingKey<C>, Error>
 where
-    C: AssociatedOid + CurveArithmetic + PrimeCurve,
+    C: CertificateCurve + CurveArithmetic + PrimeCurve,
     AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
     FieldBytesSize<C>: ModulusSize,
 {
-    certificate
-        .tbs_certificate
-        .subject_public_key_info
-        .owned_to_ref()
-        .try_into()
-        .map(|key: PublicKey<C>| key.into())
-        .context("could not parse public key from PKCS8 SPKI")
+    let spki = &certificate.tbs_certificate.subject_public_key_info;
+    if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
+        bail!("certificate public key algorithm is not id-ecPublicKey");
+    }
+
+    let curve_oid = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .context("certificate EC public key is missing named-curve parameters")?
+        .decode_as::<ObjectIdentifier>()
+        .context("certificate EC public key parameters are not a named-curve OID")?;
+    if curve_oid != C::OID {
+        bail!("certificate EC public key uses an unexpected named curve");
+    }
+
+    PublicKey::<C>::from_sec1_bytes(spki.subject_public_key.raw_bytes())
+        .map(Into::into)
+        .context("could not parse certificate SEC1 public key")
 }
 
 /// Get the first CommonName of the X.509 certificate, or return "Unknown".
