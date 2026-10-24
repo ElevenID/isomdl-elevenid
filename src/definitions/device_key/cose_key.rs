@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use coset::iana::Algorithm;
-use p256::EncodedPoint;
+use p256::Sec1Point as EncodedPoint;
 use serde::{Deserialize, Serialize};
 
 /// An implementation of RFC-8152 [COSE_Key](https://datatracker.ietf.org/doc/html/rfc8152#section-13)

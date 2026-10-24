@@ -1,28 +1,47 @@
 use anyhow::{bail, Context, Error};
 use const_oid::{
     db::{rfc4519::COMMON_NAME, rfc5912::ID_EC_PUBLIC_KEY},
-    AssociatedOid, ObjectIdentifier,
+    ObjectIdentifier,
 };
 use der::{
     asn1::{Ia5StringRef, PrintableStringRef, TeletexStringRef, Utf8StringRef},
     Tag, Tagged,
 };
-use ecdsa::{PrimeCurve, VerifyingKey};
+use ecdsa::{EcdsaCurve, VerifyingKey};
 use elliptic_curve::{
-    sec1::{FromEncodedPoint, ToEncodedPoint},
+    sec1::{FromSec1Point, ToSec1Point},
     AffinePoint, CurveArithmetic, FieldBytesSize, PublicKey,
 };
 use sec1::point::ModulusSize;
 use x509_cert::{attr::AttributeValue, Certificate};
 
+/// Named-curve identity for the supported public EC certificate keys.
+///
+/// This bridges the verifier's X.509 OID type without enabling private-key
+/// PKCS#8 codecs on the curve backend.
+pub trait NamedCurve: EcdsaCurve {
+    const CURVE_OID: ObjectIdentifier;
+}
+
+impl NamedCurve for p256::NistP256 {
+    const CURVE_OID: ObjectIdentifier = const_oid::db::rfc5912::SECP_256_R_1;
+}
+impl NamedCurve for p384::NistP384 {
+    const CURVE_OID: ObjectIdentifier = const_oid::db::rfc5912::SECP_384_R_1;
+}
+#[cfg(feature = "issuer-planning")]
+impl NamedCurve for p521::NistP521 {
+    const CURVE_OID: ObjectIdentifier = const_oid::db::rfc5912::SECP_521_R_1;
+}
+
 /// Get the public key from a certificate for verification.
 pub fn public_key<C>(certificate: &Certificate) -> Result<VerifyingKey<C>, Error>
 where
-    C: AssociatedOid + CurveArithmetic + PrimeCurve,
-    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+    C: NamedCurve + CurveArithmetic,
+    AffinePoint<C>: FromSec1Point<C> + ToSec1Point<C>,
     FieldBytesSize<C>: ModulusSize,
 {
-    public_key_with_oid(certificate, <C as AssociatedOid>::OID)
+    public_key_with_oid(certificate, C::CURVE_OID)
 }
 
 pub(crate) fn public_key_with_oid<C>(
@@ -30,8 +49,8 @@ pub(crate) fn public_key_with_oid<C>(
     expected_curve_oid: ObjectIdentifier,
 ) -> Result<VerifyingKey<C>, Error>
 where
-    C: CurveArithmetic + PrimeCurve,
-    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+    C: CurveArithmetic + EcdsaCurve,
+    AffinePoint<C>: FromSec1Point<C> + ToSec1Point<C>,
     FieldBytesSize<C>: ModulusSize,
 {
     let spki = &certificate.tbs_certificate.subject_public_key_info;

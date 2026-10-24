@@ -85,6 +85,26 @@ retain the scalar route. Batch preparation also defaults to the scalar executor;
 selecting another executor remains explicit, does not sign or issue a
 credential, and does not activate a service route.
 
+## Shared public cryptography backend
+
+Public verification and remote issuance completion use RustCrypto curves 0.14
+and the ECDSA 0.17 verification-only feature split maintained in
+`ElevenID/ssi-elevenid` (PR10). The selected package requires patched
+crypto-bigint >=0.7.6. Consuming Cargo roots must select the identical ECDSA Git
+package explicitly; dependency-root patches are not transitive. Production
+presentation, issuer-planning, and session roles exclude ECDSA signing and the
+combined curve `ecdsa` features. Session entropy remains explicitly selected.
+
+The backend upgrade changes Rust curve/signature types. Generic certificate
+public-key wrappers now require this crate's public `x509::NamedCurve` contract
+instead of the old const-oid generation's `AssociatedOid`. P-256, P-384 and the
+issuer-planning P-521 path retain their existing named-curve identities without
+enabling private-key PKCS#8 codecs in production. Certificate DER and public
+signature fixtures remain unchanged. A test-only SPKI bridge preserves the
+older X.509 builder's encoding and signer interface; no production signer is
+added. Two unreferenced test-only local async issuance helpers and their obsolete
+async-signature dependency are removed. Existing executed assertions remain.
+
 ## Upstream maintenance
 
 The `Sync upstream` GitHub workflow runs on the first day of every month and

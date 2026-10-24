@@ -11,10 +11,10 @@ use crate::definitions::Mso;
 use crate::definitions::{device_signed::DeviceAuthentication, helpers::Tag24};
 use crate::presentation::authentication::Error;
 use anyhow::Result;
-#[cfg(test)]
-use elliptic_curve::generic_array::GenericArray;
 use issuer_signed::IssuerSigned;
 use p256::ecdsa::Signature;
+#[cfg(test)]
+use p256::FieldBytes;
 
 pub fn issuer_authentication(x5chain: X5Chain, issuer_signed: &IssuerSigned) -> Result<(), Error> {
     let signer_key: P256Verifier = x5chain
@@ -77,7 +77,7 @@ fn verify_device_authentication_payload(
     let device_key: CoseKey = mso.into_inner().device_key_info.device_key;
     match device_key {
         key @ CoseKey::EC2 { .. } => {
-            let encoded_point = p256::EncodedPoint::try_from(key)?;
+            let encoded_point = p256::Sec1Point::try_from(key)?;
             let verifying_key = P256Verifier::from_sec1_bytes(encoded_point.as_bytes())
                 .map_err(|e| Error::MdocAuth(e.to_string()))?;
             let device_auth: &DeviceAuth = &document.device_signed.device_auth;
@@ -211,9 +211,9 @@ mod tests {
             .unwrap();
         let y = hex::decode("3399f39ebc77152e320108045355521527d183873b7fb6658b2ab6bd5a7f60af")
             .unwrap();
-        let point = p256::EncodedPoint::from_affine_coordinates(
-            GenericArray::from_slice(&x),
-            GenericArray::from_slice(&y),
+        let point = p256::Sec1Point::from_affine_coordinates(
+            &FieldBytes::try_from(x.as_slice()).unwrap(),
+            &FieldBytes::try_from(y.as_slice()).unwrap(),
             false,
         );
         let key = P256Verifier::from_sec1_bytes(point.as_bytes()).unwrap();
@@ -242,9 +242,9 @@ mod tests {
             .unwrap();
         let y = hex::decode("3399f39ebc77152e320108045355521527d183873b7fb6658b2ab6bd5a7f60af")
             .unwrap();
-        let point = p256::EncodedPoint::from_affine_coordinates(
-            GenericArray::from_slice(&x),
-            GenericArray::from_slice(&y),
+        let point = p256::Sec1Point::from_affine_coordinates(
+            &FieldBytes::try_from(x.as_slice()).unwrap(),
+            &FieldBytes::try_from(y.as_slice()).unwrap(),
             false,
         );
         let key = P256Verifier::from_sec1_bytes(point.as_bytes()).unwrap();
