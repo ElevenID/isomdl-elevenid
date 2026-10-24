@@ -4,11 +4,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-#[cfg(test)]
-use async_signature::AsyncSigner;
 use coset::iana::Algorithm;
 use coset::{CoseSign1, Label};
-use ecdsa::hazmat::{bits2field, verify_prehashed};
+use ecdsa::hazmat::verify_prehashed;
 use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -509,43 +507,6 @@ impl Mdoc {
 
         prepared_mdoc.complete(x5chain, signature)
     }
-
-    /// Directly sign and issue an mdoc.
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn issue_async<S, Sig>(
-        doc_type: String,
-        namespaces: Namespaces,
-        validity_info: ValidityInfo,
-        digest_algorithm: DigestAlgorithm,
-        device_key_info: DeviceKeyInfo,
-        x5chain: X5Chain,
-        enable_decoy_digests: bool,
-        signer: S,
-    ) -> Result<Mdoc>
-    where
-        S: AsyncSigner<Sig> + SignatureAlgorithm,
-        Sig: SignatureEncoding + Send + 'static,
-    {
-        let prepared_mdoc = Self::prepare(
-            doc_type,
-            namespaces,
-            validity_info,
-            digest_algorithm,
-            device_key_info,
-            signer.algorithm(),
-            enable_decoy_digests,
-        )?;
-
-        let signature_payload = prepared_mdoc.signature_payload();
-        let signature = signer
-            .sign_async(signature_payload)
-            .await
-            .map_err(|e| anyhow!("error signing cosesign1: {}", e))?
-            .to_vec();
-
-        prepared_mdoc.complete(x5chain, signature)
-    }
 }
 
 impl PreparedMdoc {
@@ -600,11 +561,9 @@ fn verify_remote_signature(
                 )
                 .map_err(|error| anyhow!("invalid ES256 end-entity public key: {error}"))?;
             let digest = Sha256::digest(payload);
-            let field = bits2field::<p256::NistP256>(&digest)
-                .map_err(|error| anyhow!("invalid ES256 message digest: {error}"))?;
             verify_prehashed(
                 &p256::ProjectivePoint::from(*key.as_affine()),
-                &field,
+                &digest,
                 &signature,
             )
         }
@@ -617,11 +576,9 @@ fn verify_remote_signature(
                 )
                 .map_err(|error| anyhow!("invalid ES384 end-entity public key: {error}"))?;
             let digest = Sha384::digest(payload);
-            let field = bits2field::<p384::NistP384>(&digest)
-                .map_err(|error| anyhow!("invalid ES384 message digest: {error}"))?;
             verify_prehashed(
                 &p384::ProjectivePoint::from(*key.as_affine()),
-                &field,
+                &digest,
                 &signature,
             )
         }
@@ -634,11 +591,9 @@ fn verify_remote_signature(
                 )
                 .map_err(|error| anyhow!("invalid ES512 end-entity public key: {error}"))?;
             let digest = Sha512::digest(payload);
-            let field = bits2field::<p521::NistP521>(&digest)
-                .map_err(|error| anyhow!("invalid ES512 message digest: {error}"))?;
             verify_prehashed(
                 &p521::ProjectivePoint::from(*key.as_affine()),
-                &field,
+                &digest,
                 &signature,
             )
         }
@@ -773,43 +728,6 @@ impl Builder {
             enable_decoy_digests,
             signer,
         )
-    }
-
-    /// Directly issue an mdoc.
-    #[cfg(test)]
-    pub async fn issue_async<S, Sig>(self, x5chain: X5Chain, signer: S) -> Result<Mdoc>
-    where
-        S: AsyncSigner<Sig> + SignatureAlgorithm,
-        Sig: SignatureEncoding + Send + 'static,
-    {
-        let doc_type = self
-            .doc_type
-            .ok_or_else(|| anyhow!("missing parameter: 'doc_type'"))?;
-        let namespaces = self
-            .namespaces
-            .ok_or_else(|| anyhow!("missing parameter: 'namespaces'"))?;
-        let validity_info = self
-            .validity_info
-            .ok_or_else(|| anyhow!("missing parameter: 'validity_info'"))?;
-        let digest_algorithm = self
-            .digest_algorithm
-            .ok_or_else(|| anyhow!("missing parameter: 'digest_algorithm'"))?;
-        let device_key_info = self
-            .device_key_info
-            .ok_or_else(|| anyhow!("missing parameter: 'device_key_info'"))?;
-        let enable_decoy_digests = self.enable_decoy_digests.unwrap_or(true);
-
-        Mdoc::issue_async(
-            doc_type,
-            namespaces,
-            validity_info,
-            digest_algorithm,
-            device_key_info,
-            x5chain,
-            enable_decoy_digests,
-            signer,
-        )
-        .await
     }
 }
 
@@ -1298,7 +1216,7 @@ where
 
 #[cfg(test)]
 pub mod test {
-    use elliptic_curve::sec1::ToEncodedPoint;
+    use elliptic_curve::sec1::ToSec1Point;
     use p256::ecdsa::{Signature, SigningKey};
     use p256::pkcs8::DecodePrivateKey;
     use p256::SecretKey;
@@ -1531,7 +1449,7 @@ pub mod test {
         let der_bytes = base64::decode(der).unwrap();
         let key = p256::SecretKey::from_sec1_der(&der_bytes).unwrap();
         let pub_key = key.public_key();
-        let ec = pub_key.to_encoded_point(false);
+        let ec = pub_key.to_sec1_point(false);
         let x = ec.x().unwrap().to_vec();
         let y = EC2Y::Value(ec.y().unwrap().to_vec());
         let device_key = CoseKey::EC2 {
@@ -1637,7 +1555,10 @@ pub mod test {
             .complete(chain(), wrong_payload_signature.to_vec())
             .is_err());
 
-        let wrong_signer = SigningKey::random(&mut rand::thread_rng());
+        let wrong_signer = {
+            use elliptic_curve::Generate;
+            SigningKey::generate()
+        };
         let wrong_key_signature: Signature = wrong_signer.sign(prepared.signature_payload());
         assert!(prepared
             .clone()

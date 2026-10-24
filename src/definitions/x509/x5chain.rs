@@ -4,18 +4,18 @@ use crate::definitions::helpers::NonEmptyVec;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 
-use const_oid::{AssociatedOid, ObjectIdentifier};
+use const_oid::ObjectIdentifier;
 
 use ciborium::Value as CborValue;
-use ecdsa::{PrimeCurve, VerifyingKey};
+use ecdsa::{EcdsaCurve, VerifyingKey};
 use elliptic_curve::{
-    sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
+    sec1::{FromSec1Point, ModulusSize, ToSec1Point},
     AffinePoint, CurveArithmetic, FieldBytesSize,
 };
 use x509_cert::der::Encode;
 use x509_cert::{certificate::Certificate, der::Decode};
 
-use super::util::{common_name_or_unknown, public_key};
+use super::util::{common_name_or_unknown, public_key, NamedCurve};
 
 /// See: <https://www.iana.org/assignments/cose/cose.xhtml#header-parameters>
 pub const X5CHAIN_COSE_HEADER_LABEL: i64 = 0x21;
@@ -108,8 +108,8 @@ impl X5Chain {
     /// Retrieve the public key of the end-entity certificate.
     pub fn end_entity_public_key<C>(&self) -> Result<VerifyingKey<C>, Error>
     where
-        C: AssociatedOid + CurveArithmetic + PrimeCurve,
-        AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+        C: NamedCurve + CurveArithmetic,
+        AffinePoint<C>: FromSec1Point<C> + ToSec1Point<C>,
         FieldBytesSize<C>: ModulusSize,
     {
         public_key(self.end_entity_certificate())
@@ -120,8 +120,8 @@ impl X5Chain {
         expected_curve_oid: ObjectIdentifier,
     ) -> Result<VerifyingKey<C>, Error>
     where
-        C: CurveArithmetic + PrimeCurve,
-        AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+        C: CurveArithmetic + EcdsaCurve,
+        AffinePoint<C>: FromSec1Point<C> + ToSec1Point<C>,
         FieldBytesSize<C>: ModulusSize,
     {
         super::util::public_key_with_oid(self.end_entity_certificate(), expected_curve_oid)
@@ -197,11 +197,11 @@ pub mod test {
     }
 
     #[test]
-    fn preserves_the_existing_associated_oid_generic_bound() {
-        fn decode_with_existing_bound<C>(x5chain: &X5Chain) -> Result<VerifyingKey<C>, Error>
+    fn preserves_public_named_curve_generic_bound() {
+        fn decode_with_named_curve_bound<C>(x5chain: &X5Chain) -> Result<VerifyingKey<C>, Error>
         where
-            C: const_oid::AssociatedOid + CurveArithmetic + PrimeCurve,
-            AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+            C: NamedCurve + CurveArithmetic,
+            AffinePoint<C>: FromSec1Point<C> + ToSec1Point<C>,
             FieldBytesSize<C>: ModulusSize,
         {
             x5chain.end_entity_public_key::<C>()
@@ -212,8 +212,8 @@ pub mod test {
             .expect("unable to add cert")
             .build()
             .expect("unable to build x5chain");
-        decode_with_existing_bound::<p256::NistP256>(&x5chain)
-            .expect("the established AssociatedOid wrapper remains compatible");
+        decode_with_named_curve_bound::<p256::NistP256>(&x5chain)
+            .expect("the public named-curve wrapper decodes the same P-256 certificate");
     }
 
     #[test]

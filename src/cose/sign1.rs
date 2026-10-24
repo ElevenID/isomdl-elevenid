@@ -95,8 +95,7 @@ impl Verifier<ecdsa::Signature<::p256::NistP256>> for P256Verifier {
         use sha2::Digest as _;
 
         let digest = sha2::Sha256::digest(message);
-        let z = ecdsa::hazmat::bits2field::<::p256::NistP256>(&digest)?;
-        ecdsa::hazmat::verify_prehashed::<::p256::NistP256>(&self.0, &z, signature)
+        ecdsa::hazmat::verify_prehashed::<::p256::NistP256>(&self.0, &digest, signature)
     }
 }
 
@@ -131,8 +130,7 @@ impl Verifier<ecdsa::Signature<::p384::NistP384>> for P384Verifier {
         use sha2::Digest as _;
 
         let digest = sha2::Sha384::digest(message);
-        let z = ecdsa::hazmat::bits2field::<::p384::NistP384>(&digest)?;
-        ecdsa::hazmat::verify_prehashed::<::p384::NistP384>(&self.0, &z, signature)
+        ecdsa::hazmat::verify_prehashed::<::p384::NistP384>(&self.0, &digest, signature)
     }
 }
 

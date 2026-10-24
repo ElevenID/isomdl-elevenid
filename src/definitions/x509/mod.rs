@@ -3,6 +3,7 @@ mod util;
 pub mod validation;
 pub mod x5chain;
 
+pub use util::NamedCurve;
 pub use x5chain::{Builder, X5Chain};
 
 #[cfg(test)]
@@ -11,11 +12,13 @@ mod test {
 
     use const_oid::ObjectIdentifier;
     use der::asn1::OctetString;
+    use elliptic_curve::Generate;
     use p256::NistP256;
     use rand::random;
-    use sec1::pkcs8::EncodePublicKey;
     use sha1::{Digest, Sha1};
-    use signature::{Keypair, KeypairRef, Signer};
+    use signature::Signer;
+    use signature_legacy::Keypair;
+    use x509_cert::spki::EncodePublicKey;
     use x509_cert::{
         builder::{Builder, CertificateBuilder},
         ext::pkix::{
@@ -25,18 +28,57 @@ mod test {
             IssuerAltName, KeyUsage, KeyUsages, SubjectKeyIdentifier,
         },
         name::Name,
-        spki::{
-            DynSignatureAlgorithmIdentifier, SignatureBitStringEncoding, SubjectPublicKeyInfoOwned,
-        },
+        spki::{DynSignatureAlgorithmIdentifier, SubjectPublicKeyInfoOwned},
         time::Validity,
         Certificate,
     };
 
     use super::validation;
 
+    // Test-only bridge between the existing X.509 builder's SPKI/signature
+    // generation and the modern curve backend. DER bytes are unchanged.
+    struct CertificateTestKey(p256::ecdsa::SigningKey);
+    #[derive(Clone)]
+    struct CertificateTestPublic(ecdsa::VerifyingKey<NistP256>);
+
+    impl Keypair for CertificateTestKey {
+        type VerifyingKey = CertificateTestPublic;
+        fn verifying_key(&self) -> Self::VerifyingKey {
+            CertificateTestPublic(*self.0.verifying_key())
+        }
+    }
+    impl EncodePublicKey for CertificateTestPublic {
+        fn to_public_key_der(&self) -> x509_cert::spki::Result<der::Document> {
+            use p256::pkcs8::EncodePublicKey as _;
+            let document = self
+                .0
+                .to_public_key_der()
+                .map_err(|_| x509_cert::spki::Error::KeyMalformed)?;
+            Ok(der::Document::try_from(document.as_bytes())?)
+        }
+    }
+    impl DynSignatureAlgorithmIdentifier for CertificateTestKey {
+        fn signature_algorithm_identifier(
+            &self,
+        ) -> x509_cert::spki::Result<x509_cert::spki::AlgorithmIdentifierOwned> {
+            Ok(x509_cert::spki::AlgorithmIdentifierOwned {
+                oid: ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
+                parameters: None,
+            })
+        }
+    }
+    impl CertificateTestKey {
+        fn generate() -> Self {
+            Self(p256::ecdsa::SigningKey::generate())
+        }
+        fn sign(&self, message: &[u8]) -> ecdsa::Signature<NistP256> {
+            self.0.sign(message)
+        }
+    }
+
     fn prepare_root_certificate<S>(root_key: &S, issuer: Name) -> CertificateBuilder<'_, S>
     where
-        S: KeypairRef + DynSignatureAlgorithmIdentifier,
+        S: Keypair + DynSignatureAlgorithmIdentifier,
         S::VerifyingKey: EncodePublicKey,
     {
         let spki = SubjectPublicKeyInfoOwned::from_key(root_key.verifying_key()).unwrap();
@@ -95,7 +137,7 @@ mod test {
         issuer: Name,
     ) -> CertificateBuilder<'s, S>
     where
-        S: KeypairRef + DynSignatureAlgorithmIdentifier,
+        S: Keypair + DynSignatureAlgorithmIdentifier,
         S::VerifyingKey: EncodePublicKey,
     {
         let spki = SubjectPublicKeyInfoOwned::from_key(signer_key.verifying_key()).unwrap();
@@ -161,8 +203,8 @@ mod test {
     }
 
     fn setup() -> (Certificate, Certificate) {
-        let root_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
-        let signer_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let root_key = CertificateTestKey::generate();
+        let signer_key = CertificateTestKey::generate();
 
         let issuer: Name = "CN=issuer,C=US".parse().unwrap();
 
@@ -170,7 +212,7 @@ mod test {
         let signature: ecdsa::Signature<NistP256> =
             root_key.sign(&prepared_root_certificate.finalize().unwrap());
         let root_certificate: Certificate = prepared_root_certificate
-            .assemble(signature.to_der().to_bitstring().unwrap())
+            .assemble(der::asn1::BitString::from_bytes(signature.to_der().as_bytes()).unwrap())
             .unwrap();
 
         let mut prepared_signer_certificate =
@@ -178,7 +220,7 @@ mod test {
         let signature: ecdsa::Signature<NistP256> =
             root_key.sign(&prepared_signer_certificate.finalize().unwrap());
         let signer_certificate: Certificate = prepared_signer_certificate
-            .assemble(signature.to_der().to_bitstring().unwrap())
+            .assemble(der::asn1::BitString::from_bytes(signature.to_der().as_bytes()).unwrap())
             .unwrap();
 
         assert!(validation::signature::issuer_signed_subject(

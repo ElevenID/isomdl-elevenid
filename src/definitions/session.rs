@@ -16,6 +16,8 @@ use crate::definitions::session::EncodedPoints::{Ep256, Ep384};
 
 #[cfg(feature = "session-key-agreement")]
 use crate::definitions::session_crypto::{hkdf_sha256_32_with_scratch, HkdfScratch, SecureSha256};
+#[cfg(feature = "session-key-agreement")]
+use aes_gcm::aead::generic_array::{sequence::Concat, typenum::U32, GenericArray};
 #[cfg(all(feature = "session-key-agreement", target_family = "wasm"))]
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
@@ -29,20 +31,15 @@ use aws_lc_rs::aead::{
     AES_256_GCM,
 };
 #[cfg(feature = "session-key-agreement")]
-use ecdsa::EncodedPoint;
+use elliptic_curve::sec1::Sec1Point;
 #[cfg(feature = "session-key-agreement")]
-use elliptic_curve::{
-    ecdh::EphemeralSecret,
-    ecdh::SharedSecret,
-    generic_array::{sequence::Concat, typenum::U32, GenericArray},
-    sec1::FromEncodedPoint,
-};
+use elliptic_curve::Generate;
+#[cfg(feature = "session-key-agreement")]
+use elliptic_curve::{ecdh::EphemeralSecret, ecdh::SharedSecret, sec1::FromSec1Point};
 #[cfg(feature = "session-key-agreement")]
 use p256::NistP256;
 #[cfg(feature = "session-key-agreement")]
 use p384::NistP384;
-#[cfg(feature = "session-key-agreement")]
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "session-key-agreement")]
 use zeroize::{Zeroize, Zeroizing};
@@ -497,11 +494,11 @@ pub enum EphemeralSecrets {
 #[cfg(feature = "session-key-agreement")]
 pub enum EncodedPoints {
     /// Represents a session with an Ep256 encoded point.
-    Ep256(EncodedPoint<NistP256>),
+    Ep256(Sec1Point<NistP256>),
 
     /// Represents an Ep384 session.
-    /// This struct holds an encoded point of type `EncodedPoint<NistP384>`.
-    Ep384(EncodedPoint<NistP384>),
+    /// This struct holds an encoded point of type `Sec1Point<NistP384>`.
+    Ep384(Sec1Point<NistP384>),
 }
 
 #[cfg(feature = "session-key-agreement")]
@@ -527,9 +524,9 @@ impl From<EncodedPoints> for Vec<u8> {
 
 #[cfg(feature = "session-key-agreement")]
 pub fn create_p256_ephemeral_keys() -> Result<(p256::SecretKey, CoseKey), Error> {
-    let private_key = p256::SecretKey::random(&mut OsRng);
+    let private_key = p256::SecretKey::generate();
 
-    let encoded_point = ecdsa::EncodedPoint::<NistP256>::from(private_key.public_key());
+    let encoded_point = elliptic_curve::sec1::Sec1Point::<NistP256>::from(private_key.public_key());
     let x_coordinate = encoded_point.x().ok_or(Error::EphemeralKeyError)?;
     let y_coordinate = encoded_point.y().ok_or(Error::EphemeralKeyError)?;
 
@@ -548,8 +545,8 @@ pub fn get_shared_secret(
     cose_key: CoseKey,
     e_device_key_priv: &p256::NonZeroScalar,
 ) -> Result<SharedSecret<NistP256>> {
-    let encoded_point: EncodedPoint<NistP256> = EncodedPoint::<NistP256>::try_from(cose_key)?;
-    let public_key_opt = p256::PublicKey::from_encoded_point(&encoded_point);
+    let encoded_point: Sec1Point<NistP256> = Sec1Point::<NistP256>::try_from(cose_key)?;
+    let public_key_opt = p256::PublicKey::from_sec1_point(&encoded_point);
     if public_key_opt.is_none().into() {
         return Err(anyhow::anyhow!(
             "reader's public key could not be constructed"
