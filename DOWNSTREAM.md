@@ -90,8 +90,8 @@ credential, and does not activate a service route.
 Public verification and remote issuance completion use RustCrypto curves 0.14
 and the ECDSA 0.17 verification-only feature split maintained in
 `ElevenID/ssi-elevenid` (PR10). The selected package requires patched
-crypto-bigint >=0.7.6. Consuming Cargo roots must select the identical ECDSA Git
-package explicitly; dependency-root patches are not transitive. Production
+crypto-bigint >=0.7.6. Consuming Cargo roots select the identical ECDSA Git
+package explicitly through a crates.io patch; dependency-root patches are not transitive. Production
 presentation, issuer-planning, and session roles exclude ECDSA signing and the
 combined curve `ecdsa` features. Session entropy remains explicitly selected.
 

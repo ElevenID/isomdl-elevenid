@@ -52,7 +52,7 @@ required-features = ["cli"]
 
 [dependencies]
 anyhow = "1.0"
-ecdsa = { git = "https://github.com/ElevenID/ssi-elevenid", rev = "80b9cdcdf478241f583a1b1fa4440962f8fbdc4b", version = "0.17", default-features = false, features = ["serde", "verifying"] }
+ecdsa = { version = "0.17", default-features = false, features = ["serde", "verifying"] }
 p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa-core", "serde"] }
 p384 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa-core", "serde"] }
 p521 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa-core"], optional = true }
@@ -151,4 +151,4 @@ harness = false
 required-features = ["issuer-planning"]
 
 [patch.crates-io]
-ecdsa = { git = "https://github.com/ElevenID/ssi-elevenid", rev = "80b9cdcdf478241f583a1b1fa4440962f8fbdc4b" }
+ecdsa = { git = "https://github.com/ElevenID/ssi-elevenid", rev = "234723638447c30f90cf499bce1d6b092f865e9d" }
